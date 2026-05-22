@@ -27,6 +27,22 @@ export function SiteFooter() {
             about
           </Link>
           <a
+            href="https://x.com/aeon_terminal"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-foreground"
+          >
+            @aeon_terminal ↗
+          </a>
+          <a
+            href="https://github.com/aeonterminal/aeon-terminal"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-foreground"
+          >
+            github ↗
+          </a>
+          <a
             href="https://github.com/aaronjmars/aeon"
             target="_blank"
             rel="noopener noreferrer"

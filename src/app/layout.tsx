@@ -12,7 +12,8 @@ const mono = JetBrains_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? "https://aeon-terminal.vercel.app",
+    process.env.NEXT_PUBLIC_SITE_URL ??
+      "https://aeon-terminal.drophyte99.workers.dev",
   ),
   title: {
     default: "Aeon Terminal — Autonomous agents, from the terminal",
@@ -38,6 +39,8 @@ export const metadata: Metadata = {
   },
   twitter: {
     card: "summary_large_image",
+    site: "@aeon_terminal",
+    creator: "@aeon_terminal",
     title: "Aeon Terminal",
     description: "Autonomous agents, from the terminal.",
   },

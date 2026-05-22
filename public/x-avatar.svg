@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="1000" height="1000">
+  <defs>
+    <radialGradient id="bgGlow" cx="50%" cy="38%" r="60%">
+      <stop offset="0%" stop-color="#0f1e15" />
+      <stop offset="55%" stop-color="#07090b" />
+      <stop offset="100%" stop-color="#04060a" />
+    </radialGradient>
+    <linearGradient id="scan" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#4ade80" stop-opacity="0.04" />
+      <stop offset="100%" stop-color="#4ade80" stop-opacity="0.0" />
+    </linearGradient>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="14" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+    <pattern id="scanlines" patternUnits="userSpaceOnUse" width="6" height="6">
+      <rect width="6" height="6" fill="transparent" />
+      <rect y="2" width="6" height="1" fill="#4ade80" fill-opacity="0.05" />
+    </pattern>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="1000" rx="200" fill="url(#bgGlow)" />
+  <rect width="1000" height="1000" rx="200" fill="url(#scanlines)" />
+  <rect width="1000" height="1000" rx="200" fill="url(#scan)" />
+
+  <!-- Subtle border -->
+  <rect x="8" y="8" width="984" height="984" rx="192" fill="none" stroke="#1b2a22" stroke-width="2" />
+
+  <!-- Corner traffic lights (window chrome callback) -->
+  <g transform="translate(120,140)">
+    <circle cx="0"  cy="0" r="14" fill="#ff5f57" opacity="0.85" />
+    <circle cx="38" cy="0" r="14" fill="#febc2e" opacity="0.85" />
+    <circle cx="76" cy="0" r="14" fill="#28c840" opacity="0.85" />
+  </g>
+
+  <!-- Top bar label -->
+  <text x="500" y="148"
+        font-family="ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace"
+        font-size="42"
+        font-weight="500"
+        text-anchor="middle"
+        fill="#8b97a3"
+        letter-spacing="6">
+    aeon·terminal
+  </text>
+
+  <!-- Main glyph: > _ -->
+  <g filter="url(#softGlow)">
+    <text x="500" y="640"
+          font-family="ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace"
+          font-size="520"
+          font-weight="700"
+          text-anchor="middle"
+          fill="#4ade80"
+          letter-spacing="-20">>_</text>
+  </g>
+
+  <!-- Caret underscore accent block (extra glow on the cursor) -->
+  <rect x="612" y="588" width="170" height="42" rx="6" fill="#4ade80" opacity="0.0" />
+
+  <!-- Bottom command-line hint -->
+  <text x="500" y="830"
+        font-family="ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace"
+        font-size="40"
+        text-anchor="middle"
+        fill="#4ade80"
+        opacity="0.65"
+        letter-spacing="4">$ run autonomous.skills</text>
+
+  <!-- Very subtle vignette ring -->
+  <circle cx="500" cy="500" r="486" fill="none" stroke="#0e1a13" stroke-width="2" opacity="0.6" />
+</svg>
