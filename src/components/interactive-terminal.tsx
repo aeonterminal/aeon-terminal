@@ -21,7 +21,9 @@ const HELP = `Available commands:
   whoami                     — describe the active agent
   skills [category]          — list skills (filter by category)
   cat <skill>                — show a skill spec
-  run <skill> [--dry]        — execute a skill (simulated)
+  run <skill> [prompt...]    — execute a skill via Claude (real LLM)
+  run <skill> --mock         — execute a skill with mock output (offline)
+  ask <question...>          — free-form prompt to the agent
   schedule                   — show the cron table for enabled skills
   enable <skill>             — enable a skill
   disable <skill>            — disable a skill
@@ -59,6 +61,8 @@ export function InteractiveTerminal() {
   );
   const [history, setHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState<number>(-1);
+  const [streaming, setStreaming] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -86,6 +90,86 @@ export function InteractiveTerminal() {
   const printCmd = useCallback((text: string) => {
     setEntries((prev) => [...prev, { kind: "cmd", text }]);
   }, []);
+
+  const appendToLast = useCallback((delta: string) => {
+    setEntries((prev) => {
+      const last = prev[prev.length - 1];
+      if (!last || last.kind !== "out") return prev;
+      const next = prev.slice(0, -1);
+      next.push({ ...last, text: last.text + delta });
+      return next;
+    });
+  }, []);
+
+  const runStream = useCallback(
+    async (mode: "run" | "ask", skillSlug: string | null, prompt: string) => {
+      if (streaming) {
+        print("a request is already streaming — wait or press Ctrl+C", "warn");
+        return;
+      }
+      setStreaming(true);
+      const controller = new AbortController();
+      abortRef.current = controller;
+      print("", "info");
+      try {
+        const res = await fetch("/api/exec", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode, skill: skillSlug, prompt }),
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) {
+          let errMsg = `HTTP ${res.status}`;
+          try {
+            const j = (await res.json()) as { error?: string; message?: string };
+            errMsg = j.message ?? j.error ?? errMsg;
+          } catch {
+            // ignore
+          }
+          appendToLast(`✗ api error: ${errMsg}`);
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop() ?? "";
+          for (const raw of lines) {
+            const line = raw.trim();
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload) continue;
+            try {
+              const evt = JSON.parse(payload) as
+                | { type: "text"; delta: string }
+                | { type: "done"; remaining?: number }
+                | { type: "error"; message: string };
+              if (evt.type === "text") {
+                appendToLast(evt.delta);
+              } else if (evt.type === "error") {
+                appendToLast(`\n✗ ${evt.message}`);
+              }
+            } catch {
+              // skip
+            }
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg !== "AbortError" && !msg.includes("abort"))
+          appendToLast(`\n✗ ${msg}`);
+        else appendToLast(`\n· cancelled`);
+      } finally {
+        setStreaming(false);
+        abortRef.current = null;
+      }
+    },
+    [appendToLast, print, streaming],
+  );
 
   const exec = useCallback(
     (raw: string) => {
@@ -152,25 +236,42 @@ export function InteractiveTerminal() {
         }
         case "run": {
           const slug = rest[0];
-          const dry = rest.includes("--dry");
+          const mock = rest.includes("--mock") || rest.includes("--dry");
           const s = slug ? skillBySlug.get(slug) : undefined;
           if (!s) {
             print(`skill not found: ${slug ?? "<none>"}`, "err");
             return;
           }
-          print(`» run ${s.name}${dry ? " (dry)" : ""}`, "info");
-          print(`  · loaded soul · matched voice 0.${rand(88, 99)}`, "muted");
-          print(`  · fetched context (${rand(3, 14)} sources)`, "muted");
-          print(`  · drafted · ${rand(180, 520)}w · cost $0.0${rand(10, 90)}`,
-            "muted");
-          if (dry) {
-            print(`✓ dry-run complete · output in .outputs/${s.slug}.md`, "ok");
-          } else {
+          if (mock) {
+            print(`» run ${s.name} (mock)`, "info");
+            print(`  · loaded soul · matched voice 0.${rand(88, 99)}`, "muted");
+            print(`  · fetched context (${rand(3, 14)} sources)`, "muted");
             print(
-              `✓ ${s.name} ran · notified ${["telegram", "discord", "slack"][rand(0, 2)]}`,
+              `  · drafted · ${rand(180, 520)}w · cost $0.0${rand(10, 90)}`,
+              "muted",
+            );
+            print(
+              `✓ mock complete · output in .outputs/${s.slug}.md`,
               "ok",
             );
+            return;
           }
+          const extra = rest.slice(1).filter((t) => !t.startsWith("--")).join(" ").trim();
+          const userPrompt = extra
+            ? `Execute the ${s.name} skill with this additional context: ${extra}`
+            : `Execute the ${s.name} skill now.`;
+          print(`» run ${s.name}`, "info");
+          void runStream("run", s.slug, userPrompt);
+          return;
+        }
+        case "ask": {
+          const question = rest.join(" ").trim();
+          if (!question) {
+            print("usage: ask <your question>", "warn");
+            return;
+          }
+          print(`» ask`, "info");
+          void runStream("ask", null, question);
           return;
         }
         case "schedule": {
@@ -246,7 +347,7 @@ export function InteractiveTerminal() {
           );
       }
     },
-    [enabled, print, printCmd, skillBySlug],
+    [enabled, print, printCmd, runStream, skillBySlug],
   );
 
   const onSubmit = useCallback(
@@ -284,9 +385,12 @@ export function InteractiveTerminal() {
       } else if (e.key === "l" && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         setEntries(INITIAL);
+      } else if (e.key === "c" && e.ctrlKey && streaming) {
+        e.preventDefault();
+        abortRef.current?.abort();
       }
     },
-    [history, historyIdx, input],
+    [history, historyIdx, input, streaming],
   );
 
   return (
@@ -319,7 +423,9 @@ export function InteractiveTerminal() {
           <label className="sr-only" htmlFor="term-input">
             terminal input
           </label>
-          <span className="select-none text-accent">{">"}&nbsp;</span>
+          <span className="select-none text-accent">
+            {streaming ? "·" : ">"}&nbsp;
+          </span>
           <input
             id="term-input"
             ref={inputRef}
@@ -330,8 +436,13 @@ export function InteractiveTerminal() {
             autoCorrect="off"
             autoCapitalize="off"
             spellCheck={false}
-            className="w-full flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-2"
-            placeholder="type a command — try 'help' or 'skills'"
+            disabled={streaming}
+            className="w-full flex-1 bg-transparent text-foreground outline-none placeholder:text-muted-2 disabled:opacity-60"
+            placeholder={
+              streaming
+                ? "streaming… ctrl+c to cancel"
+                : "try 'ask hello' or 'run morning-brief'"
+            }
           />
         </form>
       </div>
@@ -383,6 +494,7 @@ const COMMANDS = [
   "skills",
   "cat",
   "run",
+  "ask",
   "schedule",
   "enable",
   "disable",
