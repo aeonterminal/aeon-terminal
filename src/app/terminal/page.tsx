@@ -5,16 +5,16 @@ import { TerminalWindow } from "@/components/terminal-window";
 export const metadata: Metadata = {
   title: "Terminal",
   description:
-    "Interactive Aeon Terminal demo. Try commands like `skills`, `run morning-brief --dry`, or `status`.",
+    "Interactive Aeon Terminal. Try `ask hello`, `run morning-brief`, or `skills`. Backed by Claude.",
 };
 
 const QUICK = [
   { c: "help", d: "show every command" },
+  { c: "ask <q>", d: "free-form prompt to claude" },
+  { c: "run morning-brief", d: "execute a skill (real LLM)" },
+  { c: "run pr-review --mock", d: "execute with canned output" },
   { c: "skills", d: "list everything · filter by category" },
   { c: "cat morning-brief", d: "show a skill spec" },
-  { c: "run pr-review --dry", d: "simulate a skill run" },
-  { c: "schedule", d: "what's next on the clock" },
-  { c: "enable deep-research", d: "flip a skill on" },
   { c: "status", d: "fleet & skill health" },
 ];
 
@@ -30,8 +30,9 @@ export default function TerminalPage() {
             Interactive Aeon Terminal
           </h1>
           <p className="mt-2 max-w-xl text-sm text-muted">
-            A fully simulated session. No backend, no keys. Try a command —
-            up/down for history, tab for completion.
+            A real session backed by Claude. <code className="text-foreground">ask</code>{" "}
+            and <code className="text-foreground">run</code> hit the LLM; everything
+            else is local. Up/down for history, tab for completion, ctrl+c to cancel.
           </p>
         </div>
         <a

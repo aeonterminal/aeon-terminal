@@ -19,17 +19,17 @@
 **Aeon Terminal** is a from-scratch product inspired by [aaronjmars/aeon](https://github.com/aaronjmars/aeon) — the autonomous agent framework. Where Aeon ships a Next.js dashboard plus GitHub Actions wiring, **Aeon Terminal** is a focused, terminal-first surface for the same idea:
 
 - a **skill catalog** you browse like a unix tool
-- an **interactive terminal** you can poke at without keys or a backend
+- an **interactive terminal** backed by **Claude** — `ask <q>` for free chat, `run <skill>` for per-skill personas
 - a **manifesto** for why the most autonomous agent is the one that never asks
 
-> **Heads up:** Aeon Terminal is a marketing/demo site. It does not actually run agents. The interactive terminal is a fully-simulated REPL. See [aaronjmars/aeon](https://github.com/aaronjmars/aeon) for the real, autonomous-agent framework that runs on GitHub Actions.
+> **Heads up:** Aeon Terminal is a marketing/demo site, not the production agent framework. The skill outputs are generated live by Claude with a per-skill persona prompt — they are *plausible mock content*, not real briefings, PR reviews, or token alerts. See [aaronjmars/aeon](https://github.com/aaronjmars/aeon) for the autonomous-agent framework that actually runs on GitHub Actions.
 
 ## Pages
 
 | Route        | What it is                                                          |
 | ------------ | ------------------------------------------------------------------- |
 | `/`          | Landing with animated hero terminal, principles, comparison, CTA.   |
-| `/terminal`  | Interactive simulated REPL — `help`, `skills`, `run <skill>`, etc.  |
+| `/terminal`  | Real REPL backed by Claude — `ask`, `run <skill>`, plus local utility cmds. |
 | `/skills`    | Browseable catalog of skills, grouped by category.                  |
 | `/about`     | Manifesto + day-in-the-life timeline.                               |
 
@@ -41,7 +41,7 @@
 - **TypeScript** end-to-end.
 - **JetBrains Mono** as the only font.
 
-No backend, no database, no auth. All pages prerender as static.
+Pages prerender as static. The only runtime is a thin **Cloudflare Worker** that proxies a single endpoint (`/api/exec`) to Anthropic's Messages API with SSE streaming. The Anthropic key is a Worker secret (never in the repo or browser).
 
 ## Quick start
 

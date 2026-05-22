@@ -269,13 +269,13 @@ export default function HomePage() {
           <p className="mx-auto mt-4 max-w-xl text-sm leading-relaxed text-muted">
             Open the interactive terminal and try{" "}
             <code className="rounded bg-surface px-1.5 py-0.5 text-foreground">
-              skills
+              ask hello
             </code>{" "}
             or{" "}
             <code className="rounded bg-surface px-1.5 py-0.5 text-foreground">
-              run morning-brief --dry
+              run morning-brief
             </code>
-            . No login. No keys. Just a feel for the model.
+            . Backed by Claude. No login required.
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
             <Link
