@@ -32,41 +32,21 @@
 
   <!-- Corner traffic lights (window chrome callback) -->
   <g transform="translate(120,140)">
-    <circle cx="0"  cy="0" r="14" fill="#ff5f57" opacity="0.85" />
-    <circle cx="38" cy="0" r="14" fill="#febc2e" opacity="0.85" />
-    <circle cx="76" cy="0" r="14" fill="#28c840" opacity="0.85" />
+    <circle cx="0"  cy="0" r="18" fill="#ff5f57" opacity="0.9" />
+    <circle cx="48" cy="0" r="18" fill="#febc2e" opacity="0.9" />
+    <circle cx="96" cy="0" r="18" fill="#28c840" opacity="0.9" />
   </g>
 
-  <!-- Top bar label -->
-  <text x="500" y="148"
-        font-family="ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace"
-        font-size="42"
-        font-weight="500"
-        text-anchor="middle"
-        fill="#8b97a3"
-        letter-spacing="6">
-    aeon·terminal
-  </text>
-
-  <!-- Main glyph: > _ -->
+  <!-- Main glyph: > _ (centered, no text labels) -->
   <g filter="url(#softGlow)">
-    <text x="500" y="640"
+    <text x="500" y="620"
           font-family="ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace"
-          font-size="520"
+          font-size="560"
           font-weight="700"
           text-anchor="middle"
           fill="#FF6B1A"
-          letter-spacing="-20">>_</text>
+          letter-spacing="-30">&gt;_</text>
   </g>
-
-  <!-- Bottom command-line hint -->
-  <text x="500" y="830"
-        font-family="ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace"
-        font-size="40"
-        text-anchor="middle"
-        fill="#43C165"
-        opacity="0.75"
-        letter-spacing="4">$ run autonomous.skills</text>
 
   <!-- Very subtle vignette ring -->
   <circle cx="500" cy="500" r="486" fill="none" stroke="#1a1109" stroke-width="2" opacity="0.6" />
