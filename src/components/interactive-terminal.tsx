@@ -236,14 +236,16 @@ export function InteractiveTerminal() {
       }
       const data = (await res.json()) as {
         enabled: boolean;
+        reason?: string;
         turns: { user: string; assistant: string; ts?: string }[];
         runs: { skill: string; summary: string; ts?: string }[];
       };
       if (!data.enabled) {
-        print(
-          "memory: disabled (AEON_MEMORY KV binding not configured on the worker)",
-          "warn",
-        );
+        const hint =
+          data.reason === "binding_not_kv"
+            ? "wrong binding type \u2014 wire AEON_MEMORY as a KV Namespace Binding (not a text variable)"
+            : "no AEON_MEMORY KV binding configured on the worker";
+        print(`memory: disabled (${hint})`, "warn");
         return;
       }
       print(

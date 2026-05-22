@@ -620,6 +620,7 @@ async function handleExec(request, env) {
   }
 
   const sid = sanitizeSid(request.headers.get("x-session-id"));
+  const kvOk = hasKv(env);
   const mem = await memRead(env, sid);
 
   let system = buildSystem(skill, mode);
@@ -703,16 +704,9 @@ async function handleExec(request, env) {
       const msg = err && err.message ? err.message : String(err);
       await sendEvent({ type: "error", message: msg.slice(0, 200) });
     } finally {
-      // Persist memory only on successful completion and only when we have a
-      // session id + binding. Failures and cancellations do not write.
-      const debug = {
-        completed,
-        hasSid: Boolean(sid),
-        hasBinding: Boolean(env.AEON_MEMORY),
-        textLen: finalAssistantText.length,
-        mode,
-      };
-      if (completed && sid && env.AEON_MEMORY) {
+      // Persist memory only on successful completion when KV is wired up.
+      // Failures and cancellations skip the write.
+      if (completed && sid && kvOk) {
         try {
           const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
           if (mode === "ask") {
@@ -725,7 +719,6 @@ async function handleExec(request, env) {
               },
             ].slice(-MEM_MAX_TURNS);
             await memWrite(env, sid, "turns", turns);
-            debug.wrote = "turns:" + turns.length;
           } else if (mode === "run") {
             const runs = [
               ...mem.runs,
@@ -737,16 +730,10 @@ async function handleExec(request, env) {
               },
             ].slice(-MEM_MAX_RUNS);
             await memWrite(env, sid, "runs", runs);
-            debug.wrote = "runs:" + runs.length;
           }
-        } catch (err) {
-          debug.error = err && err.message ? String(err.message).slice(0, 100) : "unknown";
+        } catch {
+          // swallow — memory write is best-effort
         }
-      }
-      try {
-        await sendEvent({ type: "mem_debug", ...debug });
-      } catch {
-        // ignore
       }
       try {
         await writer.close();
@@ -789,8 +776,22 @@ function memKey(sid, kind) {
   return `mem:${sid}:${kind}`;
 }
 
+// A real KV namespace binding exposes get/put/delete as functions. If the
+// binding was wired up as a plain text variable by mistake, env.AEON_MEMORY
+// will be a string and these calls will throw. Guard up front.
+function hasKv(env) {
+  const kv = env && env.AEON_MEMORY;
+  return (
+    !!kv &&
+    typeof kv === "object" &&
+    typeof kv.get === "function" &&
+    typeof kv.put === "function" &&
+    typeof kv.delete === "function"
+  );
+}
+
 async function memRead(env, sid) {
-  if (!env.AEON_MEMORY || !sid) return { turns: [], runs: [] };
+  if (!hasKv(env) || !sid) return { turns: [], runs: [] };
   try {
     const [turnsRaw, runsRaw] = await Promise.all([
       env.AEON_MEMORY.get(memKey(sid, "turns")),
@@ -808,7 +809,7 @@ async function memRead(env, sid) {
 }
 
 async function memWrite(env, sid, kind, value) {
-  if (!env.AEON_MEMORY || !sid) return;
+  if (!hasKv(env) || !sid) return;
   try {
     await env.AEON_MEMORY.put(memKey(sid, kind), JSON.stringify(value), {
       expirationTtl: MEM_TTL_SECONDS,
@@ -819,7 +820,7 @@ async function memWrite(env, sid, kind, value) {
 }
 
 async function memClear(env, sid) {
-  if (!env.AEON_MEMORY || !sid) return;
+  if (!hasKv(env) || !sid) return;
   try {
     await Promise.all([
       env.AEON_MEMORY.delete(memKey(sid, "turns")),
@@ -902,11 +903,17 @@ async function handleMemory(request, env) {
   const sid = sanitizeSid(request.headers.get("x-session-id"));
   if (!sid) return json({ error: "bad_session_id" }, { status: 400 });
 
-  if (!env.AEON_MEMORY) {
+  if (!hasKv(env)) {
+    // Either the binding is missing or it was wired up as the wrong type
+    // (e.g. plain text variable). Surface a useful hint instead of pretending
+    // memory works.
+    const reason = !env.AEON_MEMORY
+      ? "binding_missing"
+      : "binding_not_kv";
     if (request.method === "GET")
-      return json({ enabled: false, turns: [], runs: [] });
+      return json({ enabled: false, reason, turns: [], runs: [] });
     if (request.method === "DELETE")
-      return json({ enabled: false, ok: true });
+      return json({ enabled: false, reason, ok: true });
     return json({ error: "method_not_allowed" }, { status: 405 });
   }
 
@@ -917,43 +924,6 @@ async function handleMemory(request, env) {
   if (request.method === "DELETE") {
     await memClear(env, sid);
     return json({ enabled: true, ok: true });
-  }
-  // POST: round-trip diagnostic — write a sentinel and immediately read it
-  // back. Reveals whether the binding actually persists writes.
-  if (request.method === "POST") {
-    const key = `mem:${sid}:diag`;
-    const value = `diag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    let writeErr = "";
-    try {
-      await env.AEON_MEMORY.put(key, value, { expirationTtl: 300 });
-    } catch (err) {
-      writeErr = err && err.message ? String(err.message).slice(0, 200) : "write_failed";
-    }
-    let readBack = null;
-    let readErr = "";
-    try {
-      readBack = await env.AEON_MEMORY.get(key);
-    } catch (err) {
-      readErr = err && err.message ? String(err.message).slice(0, 200) : "read_failed";
-    }
-    let listKeys = [];
-    let listErr = "";
-    try {
-      const listed = await env.AEON_MEMORY.list({ prefix: `mem:${sid}:`, limit: 10 });
-      listKeys = listed.keys.map((k) => k.name);
-    } catch (err) {
-      listErr = err && err.message ? String(err.message).slice(0, 200) : "list_failed";
-    }
-    return json({
-      sid: sid.slice(0, 8) + "…",
-      wrote: value,
-      readBack,
-      match: readBack === value,
-      writeErr,
-      readErr,
-      listKeys,
-      listErr,
-    });
   }
   return json({ error: "method_not_allowed" }, { status: 405 });
 }
