@@ -893,7 +893,7 @@ async function handleMemory(request, env) {
       status: 204,
       headers: {
         ...CORS,
-        "access-control-allow-methods": "GET, DELETE, OPTIONS",
+        "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
         "access-control-allow-headers": "content-type, x-session-id",
       },
     });
@@ -903,7 +903,6 @@ async function handleMemory(request, env) {
   if (!sid) return json({ error: "bad_session_id" }, { status: 400 });
 
   if (!env.AEON_MEMORY) {
-    // Degraded mode: pretend memory is empty rather than 500.
     if (request.method === "GET")
       return json({ enabled: false, turns: [], runs: [] });
     if (request.method === "DELETE")
@@ -918,6 +917,43 @@ async function handleMemory(request, env) {
   if (request.method === "DELETE") {
     await memClear(env, sid);
     return json({ enabled: true, ok: true });
+  }
+  // POST: round-trip diagnostic — write a sentinel and immediately read it
+  // back. Reveals whether the binding actually persists writes.
+  if (request.method === "POST") {
+    const key = `mem:${sid}:diag`;
+    const value = `diag-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    let writeErr = "";
+    try {
+      await env.AEON_MEMORY.put(key, value, { expirationTtl: 300 });
+    } catch (err) {
+      writeErr = err && err.message ? String(err.message).slice(0, 200) : "write_failed";
+    }
+    let readBack = null;
+    let readErr = "";
+    try {
+      readBack = await env.AEON_MEMORY.get(key);
+    } catch (err) {
+      readErr = err && err.message ? String(err.message).slice(0, 200) : "read_failed";
+    }
+    let listKeys = [];
+    let listErr = "";
+    try {
+      const listed = await env.AEON_MEMORY.list({ prefix: `mem:${sid}:`, limit: 10 });
+      listKeys = listed.keys.map((k) => k.name);
+    } catch (err) {
+      listErr = err && err.message ? String(err.message).slice(0, 200) : "list_failed";
+    }
+    return json({
+      sid: sid.slice(0, 8) + "…",
+      wrote: value,
+      readBack,
+      match: readBack === value,
+      writeErr,
+      readErr,
+      listKeys,
+      listErr,
+    });
   }
   return json({ error: "method_not_allowed" }, { status: 405 });
 }
