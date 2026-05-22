@@ -14,12 +14,12 @@ export default async function OG() {
           height: "100%",
           display: "flex",
           flexDirection: "column",
-          background: "#07090b",
-          color: "#e6edf3",
+          background: "#0a0805",
+          color: "#f0e8da",
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
           padding: 64,
           backgroundImage:
-            "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(255,107,26,0.2), transparent 60%)",
+            "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(255,107,26,0.22), transparent 60%), radial-gradient(ellipse 50% 40% at 90% 105%, rgba(67,193,101,0.1), transparent 70%)",
         }}
       >
         <div
@@ -28,7 +28,7 @@ export default async function OG() {
             alignItems: "center",
             gap: 14,
             fontSize: 22,
-            color: "#7d8590",
+            color: "#968878",
             letterSpacing: 4,
           }}
         >
@@ -55,9 +55,9 @@ export default async function OG() {
             letterSpacing: -2,
           }}
         >
-          <span style={{ color: "#7d8590" }}>$</span>
-          <span style={{ color: "#e6edf3" }}>aeon</span>
-          <span style={{ color: "#7d8590" }}>·</span>
+          <span style={{ color: "#968878" }}>$</span>
+          <span style={{ color: "#f0e8da" }}>aeon</span>
+          <span style={{ color: "#968878" }}>·</span>
           <span style={{ color: "#FF6B1A" }}>terminal</span>
         </div>
 
@@ -65,7 +65,7 @@ export default async function OG() {
           style={{
             marginTop: 36,
             fontSize: 28,
-            color: "#7d8590",
+            color: "#968878",
             maxWidth: 980,
             lineHeight: 1.4,
           }}
@@ -84,9 +84,9 @@ export default async function OG() {
           }}
         >
           <span>{">"} 34+ skills</span>
-          <span style={{ color: "#7d8590" }}>·</span>
+          <span style={{ color: "#968878" }}>·</span>
           <span style={{ color: "#43C165" }}>cron + reactive</span>
-          <span style={{ color: "#7d8590" }}>·</span>
+          <span style={{ color: "#968878" }}>·</span>
           <span>self-healing</span>
         </div>
       </div>
