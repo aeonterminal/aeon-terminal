@@ -19,7 +19,7 @@ export default async function OG() {
           fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
           padding: 64,
           backgroundImage:
-            "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(74,222,128,0.18), transparent 60%)",
+            "radial-gradient(ellipse 80% 60% at 50% -10%, rgba(255,107,26,0.2), transparent 60%)",
         }}
       >
         <div
@@ -37,8 +37,8 @@ export default async function OG() {
               width: 12,
               height: 12,
               borderRadius: 999,
-              background: "#4ade80",
-              boxShadow: "0 0 16px #4ade80",
+              background: "#FF6B1A",
+              boxShadow: "0 0 16px #FF6B1A",
             }}
           />
           AUTONOMOUS AGENT TERMINAL · V0.1.0
@@ -58,7 +58,7 @@ export default async function OG() {
           <span style={{ color: "#7d8590" }}>$</span>
           <span style={{ color: "#e6edf3" }}>aeon</span>
           <span style={{ color: "#7d8590" }}>·</span>
-          <span style={{ color: "#4ade80" }}>terminal</span>
+          <span style={{ color: "#FF6B1A" }}>terminal</span>
         </div>
 
         <div
@@ -80,12 +80,12 @@ export default async function OG() {
             display: "flex",
             gap: 28,
             fontSize: 22,
-            color: "#4ade80",
+            color: "#FF6B1A",
           }}
         >
           <span>{">"} 34+ skills</span>
           <span style={{ color: "#7d8590" }}>·</span>
-          <span>cron + reactive</span>
+          <span style={{ color: "#43C165" }}>cron + reactive</span>
           <span style={{ color: "#7d8590" }}>·</span>
           <span>self-healing</span>
         </div>

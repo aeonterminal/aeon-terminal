@@ -20,8 +20,9 @@ Code wiring. Treat it as a focused marketing/demo site.
 ## Style
 
 - One font: JetBrains Mono.
-- Two real colors: foreground `#e6edf3`, accent `#4ade80`. Everything else is
-  a muted gray. Tokens live in `src/app/globals.css`.
+- Bicolor accent system (inspired by aeon): primary `#FF6B1A` (orange),
+  secondary `#43C165` (green). Foreground `#e6edf3`, everything else muted gray.
+  Tokens live in `src/app/globals.css`.
 - Respect `prefers-reduced-motion`. Anything that animates must have a still
   fallback.
 

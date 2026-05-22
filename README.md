@@ -9,7 +9,7 @@
   <a href="https://nextjs.org"><img src="https://img.shields.io/badge/next.js-16-black?style=flat-square&logo=next.js" alt="Next.js 16"></a>
   <a href="https://react.dev"><img src="https://img.shields.io/badge/react-19-149eca?style=flat-square&logo=react" alt="React 19"></a>
   <a href="https://tailwindcss.com"><img src="https://img.shields.io/badge/tailwind-4-38bdf8?style=flat-square&logo=tailwindcss" alt="Tailwind v4"></a>
-  <img src="https://img.shields.io/badge/license-MIT-4ade80?style=flat-square" alt="MIT">
+  <img src="https://img.shields.io/badge/license-MIT-FF6B1A?style=flat-square" alt="MIT">
 </p>
 
 ---
@@ -109,8 +109,8 @@ The skill will appear on `/skills`, get a card on the home page if you add it to
 ## Design notes
 
 - **Mono everywhere.** The whole site is set in JetBrains Mono. The only deviation is bullets and headings.
-- **Two real colors.** Foreground `#e6edf3`, accent `#4ade80`. Everything else is a muted gray.
-- **Subtle CRT.** A scanline overlay and radial green glow at the top. Designed to feel like a TUI, not look like one.
+- **Aeon bicolor.** Primary accent `#FF6B1A` (orange), secondary `#43C165` (green) — borrowed from the Evangelion-inspired palette in aaronjmars/aeon. Foreground `#e6edf3` on near-black. Everything else is muted gray.
+- **Subtle CRT.** A scanline overlay and radial orange glow at the top. Designed to feel like a TUI, not look like one.
 - **Reduced-motion aware.** All typing/blink animations respect `prefers-reduced-motion`.
 
 ## License
