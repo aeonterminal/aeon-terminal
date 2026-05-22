@@ -114,7 +114,6 @@ Pages prerender as static. The only runtime is a thin Cloudflare Worker that pro
 | ------------------------------------- | ---------------------------------------------- |
 | `aeonterminal.org`                    | Canonical apex (Worker + static assets)        |
 | `terminal.aeonterminal.org`           | → 302 → `aeonterminal.org/terminal/`           |
-| `aeon-terminal.drophyte99.workers.dev`| Workers.dev fallback (same Worker)             |
 
 ## Quick start
 
