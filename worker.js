@@ -371,7 +371,7 @@ async function toolFetchUrl(input) {
     const res = await fetch(url, {
       signal: ac.signal,
       redirect: "follow",
-      headers: { "user-agent": "AeonTerminal/0.1 (+https://aeon-terminal.drophyte99.workers.dev)" },
+      headers: { "user-agent": "AeonTerminal/0.1 (+https://aeonterminal.org)" },
     });
     clearTimeout(timer);
     const ct = (res.headers.get("content-type") ?? "").toLowerCase();
@@ -450,7 +450,7 @@ async function toolReadRss(input) {
     const res = await fetch(url, {
       signal: ac.signal,
       redirect: "follow",
-      headers: { "user-agent": "AeonTerminal/0.1 (+https://aeon-terminal.drophyte99.workers.dev)" },
+      headers: { "user-agent": "AeonTerminal/0.1 (+https://aeonterminal.org)" },
     });
     clearTimeout(timer);
     if (!res.ok)
