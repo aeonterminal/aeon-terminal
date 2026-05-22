@@ -1,7 +1,7 @@
 // Aeon Terminal Cloudflare Worker.
 //
 // Routes:
-//   POST /api/exec   — proxy to Anthropic Claude, streams SSE back to the client.
+//   POST /api/exec   — proxy to Anthropic Claude (with tool use), streams SSE back.
 //   *                — delegated to the static asset binding (out/).
 
 const SKILL_REGISTRY = {
@@ -10,38 +10,38 @@ const SKILL_REGISTRY = {
     summary:
       "A focused, voice-matched briefing of the world before you open your laptop.",
     persona:
-      "Produce a 6-8 bullet morning briefing: 2 tech bullets, 2 markets, 1 culture, 1 inbox-style nudge. Make up realistic but fictional details. Keep each bullet to one line.",
+      "Produce a 6-8 bullet morning briefing: 2 tech, 2 markets, 1 culture, 1 inbox-style nudge. Use the read_rss tool on https://hnrss.org/frontpage and https://feeds.bbci.co.uk/news/world/rss.xml to pull real headlines, then synthesize. Keep each bullet to one line.",
   },
   "deep-research": {
     name: "deep-research",
     summary:
       "Multi-pass investigation of a topic with sourced claims and citations.",
     persona:
-      "Open with a one-line restatement of the topic, then 3 numbered findings with fictional but plausible citations like '(MIT Tech Review, Mar 2025)'. Close with one open question.",
+      "If the user gave a URL, fetch_url it; otherwise infer a topic from the prompt and either fetch a relevant authoritative source or generate from knowledge. Output a one-line topic restatement, 3 numbered findings with citations (URL + source), and one open question.",
   },
   "paper-digest": {
     name: "paper-digest",
     summary: "Arxiv + Hugging Face papers, filtered to what matters this week.",
     persona:
-      "Output 3 fake but realistic paper titles in arxiv-style with a one-line takeaway each. Conclude with 'Skim queue: 12 · Read queue: 3'.",
+      "Call read_rss on http://export.arxiv.org/rss/cs.AI to get the latest AI papers. Pick 3 most interesting, output title + arxiv link + one-line takeaway each. End with 'Skim queue: <n> · Read queue: 3'.",
   },
   "hacker-news-digest": {
     name: "hacker-news-digest",
     summary: "Top stories with takes, not just links. Three minute read.",
     persona:
-      "List 4 fictional HN-style headlines with a snarky-but-useful one-line take after each. End with 'Skipped: 11 ragebait, 3 hiring posts'.",
+      "Call read_rss on https://hnrss.org/frontpage?count=15 to pull real HN headlines. Pick 4 top stories, list each with a snarky-but-useful one-line take. End with 'Skipped: <n> low-signal'.",
   },
   "rss-digest": {
     name: "rss-digest",
     summary: "Roll up any RSS feed into a single coherent thread.",
     persona:
-      "Synthesize 5 fictional feed items into one 4-line narrative paragraph. No bullet points.",
+      "Expect a feed URL in the prompt. Call read_rss on it. Synthesize the latest 5 items into one 4-line narrative paragraph. If no URL given, use https://hnrss.org/frontpage as a fallback.",
   },
   "technical-explainer": {
     name: "technical-explainer",
     summary: "Convert a paper or PR into a clean explainer you can publish.",
     persona:
-      "Pick a plausible technical topic, then output: a one-line hook, three 'what changed' lines, one 'why it matters' line.",
+      "If a URL is provided, fetch_url it. Output: one-line hook, three 'what changed' lines, one 'why it matters' line. If no URL, pick a recent topic from knowledge.",
   },
 
   "pr-review": {
@@ -49,14 +49,14 @@ const SKILL_REGISTRY = {
     summary:
       "Reviews PRs against project conventions. Leaves inline comments via gh.",
     persona:
-      "Output a fake review of an imaginary PR: 'PR #1234 · /src/handler.ts'. List 3 inline comments with line numbers and a final verdict line ('LGTM with nits' / 'Block: ' / etc).",
+      "If a GitHub PR URL is provided, fetch_url it and review actual code. Otherwise output a fake review of an imaginary PR: 'PR #1234 · /src/handler.ts'. List 3 inline comments with line numbers and a final verdict ('LGTM with nits' / 'Block: ' / etc).",
   },
   "github-monitor": {
     name: "github-monitor",
     summary:
       "Tracks issues, releases, stars, and trending across a watchlist of repos.",
     persona:
-      "Output a fake repo movement digest: 3 lines like 'aeonterminal/aeon-terminal +12★ · 1 release · 2 issues'.",
+      "If a repo URL/path is in the prompt, fetch_url https://github.com/<repo> and summarize movement. Otherwise output 3 lines like 'aeonterminal/aeon-terminal +12★ · 1 release · 2 issues'.",
   },
   "auto-merge": {
     name: "auto-merge",
@@ -94,26 +94,26 @@ const SKILL_REGISTRY = {
     name: "token-alert",
     summary: "Watches a list of tokens; pings when momentum or unlocks shift.",
     persona:
-      "Output 3-4 fake token movements like '$AERO  +8.4%  vol 2.1×  flow:in', with a one-line read on the strongest mover.",
+      "Try fetch_url https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&price_change_percentage=24h for real prices. Pick 3-4 movers with the largest 24h % change, output each like '$BTC +3.2% · vol 2.1× · price $67k'. End with a one-line read.",
   },
   "on-chain-monitor": {
     name: "on-chain-monitor",
     summary: "Watches wallets, contracts, and flows for material moves.",
     persona:
-      "Output 3 lines like 'wallet 0x7f..a3  moved 412 ETH → cex (binance)' with a one-line read at the end.",
+      "Output 3 fake lines like 'wallet 0x7f..a3  moved 412 ETH → cex (binance)' with a one-line read at the end.",
   },
   "defi-monitor": {
     name: "defi-monitor",
     summary:
       "TVL, yields, exploits — a continuous read on the DeFi landscape.",
     persona:
-      "Output: 'TVL summary' line, 3 protocol lines with TVL deltas, one yield-of-the-day line, and one exploit/risk line.",
+      "Try fetch_url https://api.llama.fi/protocols for real DeFi TVL. Pick 3 movers (biggest TVL change), output one line each. End with one yield-of-the-day fake line and one risk note.",
   },
   "unlock-monitor": {
     name: "unlock-monitor",
     summary: "Flags token unlocks before they hit, with float context.",
     persona:
-      "Output 3 upcoming fake unlocks: 'TKN · 1.2M tokens · 4d · 3.4% of float', with a one-line risk read at the end.",
+      "Output 3 upcoming fake unlocks: 'TKN · 1.2M tokens · 4d · 3.4% of float'. End with a one-line risk read.",
   },
   "treasury-info": {
     name: "treasury-info",
@@ -227,13 +227,22 @@ const SKILL_REGISTRY = {
 
 const SYSTEM_BASE = `You are running inside Aeon Terminal — a terminal-first
 control surface for autonomous AI agents. Your output is rendered in a
-monospace web terminal panel. Style rules (strict):
-- Plain text only. No markdown headers (#, ##). No emoji.
-- No chatty preamble like "Sure!" or "Here is...". Get straight to output.
-- Lines under ~80 chars. Total output under 20 lines.
-- Use ASCII status markers when natural: ✓ ✗ · » →
-- Never claim to have done real work (no real APIs were called). The user
-  understands this is a demo — produce plausible, voice-matched mock output.
+monospace web terminal panel.
+
+You have two real tools:
+- fetch_url(url): Fetch any http/https URL and return up to ~5KB of body text.
+- read_rss(url, limit?): Read an RSS or Atom feed; returns latest items
+  with title, link, date, summary.
+
+When real data exists, USE THE TOOLS. Do not fabricate when you can fetch.
+Cite the URL you used.
+
+Style rules (strict):
+- Plain text only. No markdown headers (# or ##). No emoji.
+- No chatty preamble. Get straight to output.
+- Lines under ~90 chars. Total output under 22 lines.
+- Use ASCII markers when natural: ✓ ✗ · » →
+- If a fetch fails, say so briefly and continue with what you have.
 - Do not refuse, do not add disclaimers, do not mention you are an AI.`;
 
 function buildSystem(skillSlug, mode) {
@@ -243,6 +252,43 @@ function buildSystem(skillSlug, mode) {
   }
   return `${SYSTEM_BASE}\n\nThe user is exploring the Aeon Terminal demo through a free-form prompt. Respond like a terse, in-terminal assistant — informative, no fluff.`;
 }
+
+const TOOLS_SPEC = [
+  {
+    name: "fetch_url",
+    description:
+      "Fetch the contents of an HTTP(S) URL and return the response body (HTML stripped, truncated to ~5KB). Use this for live web content, articles, JSON APIs, search results.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "The URL to fetch. Must be http or https.",
+        },
+      },
+      required: ["url"],
+    },
+  },
+  {
+    name: "read_rss",
+    description:
+      "Read an RSS or Atom feed and return the latest items: title, link, date, summary. Use this for blogs, news sites, podcast feeds.",
+    input_schema: {
+      type: "object",
+      properties: {
+        url: {
+          type: "string",
+          description: "The RSS or Atom feed URL.",
+        },
+        limit: {
+          type: "number",
+          description: "Max items to return (default 8, max 15).",
+        },
+      },
+      required: ["url"],
+    },
+  },
+];
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -278,6 +324,258 @@ async function checkRateLimit(ip) {
   return { ok: true, remaining: 30 - (count + 1) };
 }
 
+// --- tools ---
+
+function isUnsafeUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return true;
+    const host = u.hostname.toLowerCase();
+    if (host === "localhost" || host === "0.0.0.0") return true;
+    if (/^127\./.test(host)) return true;
+    if (/^10\./.test(host)) return true;
+    if (/^192\.168\./.test(host)) return true;
+    if (/^169\.254\./.test(host)) return true;
+    if (/^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(host)) return true;
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function stripHtml(html) {
+  return html
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "")
+    .replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, "")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function toolFetchUrl(input) {
+  const url = String(input?.url ?? "").trim();
+  if (!url) return { content: "error: missing url", isError: true, summary: "no url" };
+  if (isUnsafeUrl(url))
+    return { content: "blocked: invalid or private URL", isError: true, summary: "blocked" };
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      signal: ac.signal,
+      redirect: "follow",
+      headers: { "user-agent": "AeonTerminal/0.1 (+https://aeon-terminal.drophyte99.workers.dev)" },
+    });
+    clearTimeout(timer);
+    const ct = (res.headers.get("content-type") ?? "").toLowerCase();
+    let body = await res.text();
+    const originalLen = body.length;
+    if (ct.includes("text/html") || /<html/i.test(body.slice(0, 200))) {
+      body = stripHtml(body);
+    }
+    const truncated = body.slice(0, 5000);
+    return {
+      content: `${res.status} ${res.statusText} · ${(originalLen / 1024).toFixed(1)}KB raw\n\n${truncated}`,
+      summary: `${(originalLen / 1024).toFixed(1)}KB · ${res.status}`,
+      isError: !res.ok,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err && err.message ? err.message : String(err);
+    return { content: `fetch error: ${msg}`, isError: true, summary: `failed: ${msg.slice(0, 40)}` };
+  }
+}
+
+function extractTag(xml, tag) {
+  const re = new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i");
+  const m = xml.match(re);
+  if (!m) return "";
+  let s = m[1];
+  const cdata = s.match(/<!\[CDATA\[([\s\S]*?)\]\]>/);
+  if (cdata) s = cdata[1];
+  return stripHtml(s);
+}
+
+function extractAttr(xml, tag, attr) {
+  const re = new RegExp(`<${tag}[^>]*\\s${attr}="([^"]*)"`, "i");
+  const m = xml.match(re);
+  return m ? m[1] : "";
+}
+
+function parseEntry(xml, kind) {
+  const title = extractTag(xml, "title");
+  const summary =
+    extractTag(xml, "description") ||
+    extractTag(xml, "summary") ||
+    extractTag(xml, "content");
+  let link = "";
+  if (kind === "rss") link = extractTag(xml, "link");
+  if (!link) link = extractAttr(xml, "link", "href");
+  const date =
+    extractTag(xml, "pubDate") ||
+    extractTag(xml, "published") ||
+    extractTag(xml, "updated");
+  return { title, link, date, summary };
+}
+
+function parseFeed(xml) {
+  const items = [];
+  const itemRe = /<item\b[^>]*>([\s\S]*?)<\/item>/gi;
+  let m;
+  while ((m = itemRe.exec(xml))) items.push(parseEntry(m[1], "rss"));
+  if (items.length === 0) {
+    const entryRe = /<entry\b[^>]*>([\s\S]*?)<\/entry>/gi;
+    while ((m = entryRe.exec(xml))) items.push(parseEntry(m[1], "atom"));
+  }
+  return items;
+}
+
+async function toolReadRss(input) {
+  const url = String(input?.url ?? "").trim();
+  const limit = Math.min(Math.max(Number(input?.limit ?? 8) || 8, 1), 15);
+  if (!url) return { content: "error: missing url", isError: true, summary: "no url" };
+  if (isUnsafeUrl(url))
+    return { content: "blocked: invalid or private URL", isError: true, summary: "blocked" };
+
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 8000);
+  try {
+    const res = await fetch(url, {
+      signal: ac.signal,
+      redirect: "follow",
+      headers: { "user-agent": "AeonTerminal/0.1 (+https://aeon-terminal.drophyte99.workers.dev)" },
+    });
+    clearTimeout(timer);
+    if (!res.ok)
+      return {
+        content: `feed error: ${res.status} ${res.statusText}`,
+        isError: true,
+        summary: `feed ${res.status}`,
+      };
+    const xml = await res.text();
+    const items = parseFeed(xml).slice(0, limit);
+    if (items.length === 0)
+      return { content: "no items found in feed", isError: false, summary: "0 items" };
+    const formatted = items
+      .map(
+        (it, i) =>
+          `${i + 1}. ${it.title}\n   url: ${it.link}\n   date: ${it.date}\n   ${(it.summary || "").slice(0, 220)}`,
+      )
+      .join("\n\n");
+    return {
+      content: formatted,
+      summary: `${items.length} items`,
+      isError: false,
+    };
+  } catch (err) {
+    clearTimeout(timer);
+    const msg = err && err.message ? err.message : String(err);
+    return { content: `feed error: ${msg}`, isError: true, summary: `failed: ${msg.slice(0, 40)}` };
+  }
+}
+
+async function runTool(name, input) {
+  if (name === "fetch_url") return toolFetchUrl(input);
+  if (name === "read_rss") return toolReadRss(input);
+  return { content: `unknown tool: ${name}`, isError: true, summary: "unknown tool" };
+}
+
+// --- streaming ---
+
+async function callAnthropic(env, system, messages) {
+  return fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": env.ANTHROPIC_API_KEY,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5",
+      max_tokens: 2048,
+      system,
+      tools: TOOLS_SPEC,
+      stream: true,
+      messages,
+    }),
+  });
+}
+
+// Parses one streaming Anthropic response. Calls onTextDelta(text) for every
+// text chunk, and returns { stopReason, contentBlocks } at end of stream.
+async function parseStream(response, onTextDelta) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const blocks = [];
+  const toolBuf = {};
+  let stopReason = null;
+  let buf = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      let evt;
+      try {
+        evt = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+
+      if (evt.type === "content_block_start") {
+        const cb = evt.content_block;
+        if (cb.type === "text") {
+          blocks[evt.index] = { type: "text", text: "" };
+        } else if (cb.type === "tool_use") {
+          blocks[evt.index] = {
+            type: "tool_use",
+            id: cb.id,
+            name: cb.name,
+            input: {},
+          };
+          toolBuf[evt.index] = "";
+        }
+      } else if (evt.type === "content_block_delta") {
+        const idx = evt.index;
+        if (evt.delta.type === "text_delta" && blocks[idx]?.type === "text") {
+          blocks[idx].text += evt.delta.text;
+          if (evt.delta.text) await onTextDelta(evt.delta.text);
+        } else if (evt.delta.type === "input_json_delta") {
+          toolBuf[idx] = (toolBuf[idx] ?? "") + evt.delta.partial_json;
+        }
+      } else if (evt.type === "content_block_stop") {
+        const idx = evt.index;
+        if (blocks[idx]?.type === "tool_use") {
+          try {
+            blocks[idx].input = JSON.parse(toolBuf[idx] || "{}");
+          } catch {
+            blocks[idx].input = {};
+          }
+        }
+      } else if (evt.type === "message_delta") {
+        if (evt.delta?.stop_reason) stopReason = evt.delta.stop_reason;
+      } else if (evt.type === "message_stop") {
+        return { stopReason, contentBlocks: blocks.filter(Boolean) };
+      }
+    }
+  }
+  return { stopReason, contentBlocks: blocks.filter(Boolean) };
+}
+
 async function handleExec(request, env) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS });
@@ -308,77 +606,75 @@ async function handleExec(request, env) {
   const limit = await checkRateLimit(ip);
   if (!limit.ok) {
     return json(
-      { error: "rate_limited", message: "30 requests/day per IP. Try tomorrow or self-host." },
+      {
+        error: "rate_limited",
+        message: "30 requests/day per IP. Try tomorrow or self-host.",
+      },
       { status: 429 },
     );
   }
 
   const system = buildSystem(skill, mode);
 
-  const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-api-key": env.ANTHROPIC_API_KEY,
-      "anthropic-version": "2023-06-01",
-    },
-    body: JSON.stringify({
-      model: "claude-haiku-4-5",
-      max_tokens: 1024,
-      system,
-      stream: true,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-
-  if (!upstream.ok || !upstream.body) {
-    const errText = await upstream.text().catch(() => "");
-    return json(
-      { error: "upstream_error", status: upstream.status, message: errText.slice(0, 200) },
-      { status: 502 },
-    );
-  }
-
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
   const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
+  const sendEvent = async (obj) => {
+    try {
+      await writer.write(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+    } catch {
+      // writer closed
+    }
+  };
+  const sendText = (text) => sendEvent({ type: "text", delta: text });
 
   (async () => {
-    const reader = upstream.body.getReader();
-    let buf = "";
-    const emit = (obj) =>
-      writer.write(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+    const messages = [{ role: "user", content: prompt }];
+    const MAX_ITERS = 5;
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
-        for (const raw of lines) {
-          const line = raw.trim();
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (!payload || payload === "[DONE]") continue;
-          try {
-            const evt = JSON.parse(payload);
-            if (
-              evt.type === "content_block_delta" &&
-              evt.delta?.type === "text_delta" &&
-              typeof evt.delta.text === "string"
-            ) {
-              if (evt.delta.text) await emit({ type: "text", delta: evt.delta.text });
-            } else if (evt.type === "message_stop") {
-              await emit({ type: "done", remaining: limit.remaining });
-            }
-          } catch {
-            // ignore malformed chunk
-          }
+      for (let iter = 0; iter < MAX_ITERS; iter++) {
+        const upstream = await callAnthropic(env, system, messages);
+        if (!upstream.ok || !upstream.body) {
+          const errText = await upstream.text().catch(() => "");
+          await sendEvent({
+            type: "error",
+            message: `upstream ${upstream.status}: ${errText.slice(0, 200)}`,
+          });
+          return;
         }
+
+        const { stopReason, contentBlocks } = await parseStream(upstream, sendText);
+
+        if (stopReason !== "tool_use") {
+          await sendEvent({ type: "done", remaining: limit.remaining });
+          return;
+        }
+
+        messages.push({ role: "assistant", content: contentBlocks });
+
+        const toolResults = [];
+        for (const block of contentBlocks) {
+          if (block.type !== "tool_use") continue;
+          const argPreview = previewArgs(block.input);
+          await sendText(`\n» ${block.name}${argPreview ? " " + argPreview : ""}\n`);
+          const result = await runTool(block.name, block.input);
+          await sendText(`  · ${result.summary}\n`);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: block.id,
+            content: result.content,
+            is_error: result.isError === true,
+          });
+        }
+        messages.push({ role: "user", content: toolResults });
       }
+      await sendEvent({
+        type: "error",
+        message: "max tool iterations reached (5)",
+      });
     } catch (err) {
-      await emit({ type: "error", message: String(err).slice(0, 200) });
+      const msg = err && err.message ? err.message : String(err);
+      await sendEvent({ type: "error", message: msg.slice(0, 200) });
     } finally {
       try {
         await writer.close();
@@ -396,6 +692,16 @@ async function handleExec(request, env) {
       ...CORS,
     },
   });
+}
+
+function previewArgs(input) {
+  if (!input || typeof input !== "object") return "";
+  if (typeof input.url === "string") return input.url.slice(0, 80);
+  try {
+    return JSON.stringify(input).slice(0, 80);
+  } catch {
+    return "";
+  }
 }
 
 const worker = {
