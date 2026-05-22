@@ -1,0 +1,8 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "aeon-terminal"
+compatibility_date = "2025-05-01"
+main = "worker.js"
+
+[assets]
+directory = "./out"
+not_found_handling = "404-page"
