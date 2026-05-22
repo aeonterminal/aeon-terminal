@@ -1,8 +1,13 @@
 // Aeon Terminal Cloudflare Worker.
 //
 // Routes:
-//   POST /api/exec   — proxy to Anthropic Claude (with tool use), streams SSE back.
-//   *                — delegated to the static asset binding (out/).
+//   POST   /api/exec     — proxy to Anthropic Claude (with tool use), streams SSE back.
+//   GET    /api/memory   — return the current session's memory (turns + runs).
+//   DELETE /api/memory   — wipe the current session's memory.
+//   *                    — delegated to the static asset binding (out/).
+//
+// Per-session memory uses the optional AEON_MEMORY KV binding. If the binding
+// is missing, the Worker degrades to stateless mode (each request fresh).
 
 const SKILL_REGISTRY = {
   "morning-brief": {
@@ -292,8 +297,8 @@ const TOOLS_SPEC = [
 
 const CORS = {
   "access-control-allow-origin": "*",
-  "access-control-allow-methods": "POST, OPTIONS",
-  "access-control-allow-headers": "content-type",
+  "access-control-allow-methods": "POST, GET, DELETE, OPTIONS",
+  "access-control-allow-headers": "content-type, x-session-id",
 };
 
 function json(data, init = {}) {
@@ -614,7 +619,13 @@ async function handleExec(request, env) {
     );
   }
 
-  const system = buildSystem(skill, mode);
+  const sid = sanitizeSid(request.headers.get("x-session-id"));
+  const mem = await memRead(env, sid);
+
+  let system = buildSystem(skill, mode);
+  if (mode === "run") {
+    system = appendRunContext(system, mem.runs, skill);
+  }
 
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
@@ -629,8 +640,15 @@ async function handleExec(request, env) {
   const sendText = (text) => sendEvent({ type: "text", delta: text });
 
   (async () => {
-    const messages = [{ role: "user", content: prompt }];
+    // For ask mode, inject prior turns so the model has conversation history.
+    // For run mode, history sits in the system prompt instead (see above).
+    const messages = injectAskHistory(
+      [{ role: "user", content: prompt }],
+      mode === "ask" ? mem.turns : [],
+    );
     const MAX_ITERS = 5;
+    let finalAssistantText = "";
+    let completed = false;
     try {
       for (let iter = 0; iter < MAX_ITERS; iter++) {
         const upstream = await callAnthropic(env, system, messages);
@@ -645,7 +663,16 @@ async function handleExec(request, env) {
 
         const { stopReason, contentBlocks } = await parseStream(upstream, sendText);
 
+        // Accumulate plain text from this assistant turn (last turn wins for
+        // memory purposes; intermediate tool-use turns also carry text deltas).
+        for (const block of contentBlocks) {
+          if (block.type === "text" && block.text) {
+            finalAssistantText += block.text;
+          }
+        }
+
         if (stopReason !== "tool_use") {
+          completed = true;
           await sendEvent({ type: "done", remaining: limit.remaining });
           return;
         }
@@ -676,6 +703,37 @@ async function handleExec(request, env) {
       const msg = err && err.message ? err.message : String(err);
       await sendEvent({ type: "error", message: msg.slice(0, 200) });
     } finally {
+      // Persist memory only on successful completion and only when we have a
+      // session id + binding. Failures and cancellations do not write.
+      if (completed && sid && env.AEON_MEMORY) {
+        try {
+          const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+          if (mode === "ask") {
+            const turns = [
+              ...mem.turns,
+              {
+                user: trunc(prompt, MEM_TRUNC_USER),
+                assistant: trunc(finalAssistantText, MEM_TRUNC_ASSISTANT),
+                ts,
+              },
+            ].slice(-MEM_MAX_TURNS);
+            await memWrite(env, sid, "turns", turns);
+          } else if (mode === "run") {
+            const runs = [
+              ...mem.runs,
+              {
+                skill,
+                prompt: trunc(prompt, MEM_TRUNC_USER),
+                summary: trunc(finalAssistantText, MEM_TRUNC_ASSISTANT),
+                ts,
+              },
+            ].slice(-MEM_MAX_RUNS);
+            await memWrite(env, sid, "runs", runs);
+          }
+        } catch {
+          // swallow — memory write is best-effort
+        }
+      }
       try {
         await writer.close();
       } catch {
@@ -692,6 +750,100 @@ async function handleExec(request, env) {
       ...CORS,
     },
   });
+}
+
+// --- session memory (optional, backed by KV) ---
+
+// Session id is supplied by the browser via the X-Session-Id header. It is
+// opaque to the worker; we only use it as a key prefix. Validate to keep
+// KV keys bounded and printable.
+function sanitizeSid(raw) {
+  if (!raw || typeof raw !== "string") return null;
+  const s = raw.trim();
+  if (s.length < 8 || s.length > 64) return null;
+  if (!/^[A-Za-z0-9_-]+$/.test(s)) return null;
+  return s;
+}
+
+const MEM_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
+const MEM_MAX_TURNS = 5;                  // ask: last N user/assistant pairs
+const MEM_MAX_RUNS = 10;                  // run: last N skill executions (any skill)
+const MEM_TRUNC_USER = 500;
+const MEM_TRUNC_ASSISTANT = 1200;
+
+function memKey(sid, kind) {
+  return `mem:${sid}:${kind}`;
+}
+
+async function memRead(env, sid) {
+  if (!env.AEON_MEMORY || !sid) return { turns: [], runs: [] };
+  try {
+    const [turnsRaw, runsRaw] = await Promise.all([
+      env.AEON_MEMORY.get(memKey(sid, "turns")),
+      env.AEON_MEMORY.get(memKey(sid, "runs")),
+    ]);
+    const turns = turnsRaw ? JSON.parse(turnsRaw) : [];
+    const runs = runsRaw ? JSON.parse(runsRaw) : [];
+    return {
+      turns: Array.isArray(turns) ? turns : [],
+      runs: Array.isArray(runs) ? runs : [],
+    };
+  } catch {
+    return { turns: [], runs: [] };
+  }
+}
+
+async function memWrite(env, sid, kind, value) {
+  if (!env.AEON_MEMORY || !sid) return;
+  try {
+    await env.AEON_MEMORY.put(memKey(sid, kind), JSON.stringify(value), {
+      expirationTtl: MEM_TTL_SECONDS,
+    });
+  } catch {
+    // swallow — memory is best-effort
+  }
+}
+
+async function memClear(env, sid) {
+  if (!env.AEON_MEMORY || !sid) return;
+  try {
+    await Promise.all([
+      env.AEON_MEMORY.delete(memKey(sid, "turns")),
+      env.AEON_MEMORY.delete(memKey(sid, "runs")),
+    ]);
+  } catch {
+    // swallow
+  }
+}
+
+function trunc(s, n) {
+  if (typeof s !== "string") return "";
+  return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+// Build the messages array for Claude: prepend prior turns (ask mode only)
+// so the model has conversational continuity.
+function injectAskHistory(messages, turns) {
+  if (!turns || turns.length === 0) return messages;
+  const prefix = [];
+  for (const t of turns.slice(-MEM_MAX_TURNS)) {
+    if (t.user) prefix.push({ role: "user", content: String(t.user) });
+    if (t.assistant)
+      prefix.push({ role: "assistant", content: String(t.assistant) });
+  }
+  return [...prefix, ...messages];
+}
+
+// For run mode, fold prior runs of the same skill into the system prompt so
+// the model can avoid repeating itself.
+function appendRunContext(system, runs, skillSlug) {
+  if (!runs || runs.length === 0) return system;
+  const sameSkill = runs.filter((r) => r.skill === skillSlug).slice(-3);
+  if (sameSkill.length === 0) return system;
+  const summaries = sameSkill
+    .map((r, i) => `${i + 1}. (${r.ts ?? "prev"}) ${trunc(r.summary, 240)}`)
+    .join("\n");
+  return `${system}\n\nRecent runs of this skill in the current session (avoid duplicating points the user already saw):\n${summaries}`;
 }
 
 function previewArgs(input) {
@@ -721,12 +873,48 @@ function redirectToCanonical(url, basePath) {
   return Response.redirect(target.toString(), 302);
 }
 
+async function handleMemory(request, env) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        ...CORS,
+        "access-control-allow-methods": "GET, DELETE, OPTIONS",
+        "access-control-allow-headers": "content-type, x-session-id",
+      },
+    });
+  }
+
+  const sid = sanitizeSid(request.headers.get("x-session-id"));
+  if (!sid) return json({ error: "bad_session_id" }, { status: 400 });
+
+  if (!env.AEON_MEMORY) {
+    // Degraded mode: pretend memory is empty rather than 500.
+    if (request.method === "GET")
+      return json({ enabled: false, turns: [], runs: [] });
+    if (request.method === "DELETE")
+      return json({ enabled: false, ok: true });
+    return json({ error: "method_not_allowed" }, { status: 405 });
+  }
+
+  if (request.method === "GET") {
+    const mem = await memRead(env, sid);
+    return json({ enabled: true, turns: mem.turns, runs: mem.runs });
+  }
+  if (request.method === "DELETE") {
+    await memClear(env, sid);
+    return json({ enabled: true, ok: true });
+  }
+  return json({ error: "method_not_allowed" }, { status: 405 });
+}
+
 const worker = {
   async fetch(request, env) {
     const url = new URL(request.url);
 
-    // /api/exec is served on every hostname (subdomain pages call it too)
+    // /api endpoints are served on every hostname (subdomain pages call them too)
     if (url.pathname === "/api/exec") return handleExec(request, env);
+    if (url.pathname === "/api/memory") return handleMemory(request, env);
 
     // Brand subdomains: redirect to canonical apex so we have one source of truth.
     const hostRule = HOST_REDIRECTS[url.hostname];

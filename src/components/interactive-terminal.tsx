@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { CATEGORIES, SKILLS, type Skill } from "@/lib/skills";
 
@@ -18,12 +19,14 @@ type Entry =
 
 const HELP = `Available commands:
   help                       — show this help
-  whoami                     — describe the active agent
+  whoami                     — describe the active agent + session
   skills [category]          — list skills (filter by category)
   cat <skill>                — show a skill spec
   run <skill> [prompt...]    — execute a skill via Claude (real LLM)
   run <skill> --mock         — execute a skill with mock output (offline)
   ask <question...>          — free-form prompt to the agent
+  memory                     — show what the agent remembers this session
+  memory clear               — wipe this session's memory
   schedule                   — show the cron table for enabled skills
   enable <skill>             — enable a skill
   disable <skill>            — disable a skill
@@ -32,18 +35,51 @@ const HELP = `Available commands:
   clear                      — clear the screen
   exit                       — disconnect (no-op)`;
 
+const SESSION_KEY = "aeon.sid";
+
+function loadOrCreateSessionId(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    const existing = window.localStorage.getItem(SESSION_KEY);
+    if (existing && /^[A-Za-z0-9_-]{8,64}$/.test(existing)) return existing;
+  } catch {
+    // localStorage may be unavailable (private mode, etc)
+  }
+  // Prefer crypto.randomUUID when available; fall back to a short random hex.
+  let sid = "";
+  try {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+      sid = crypto.randomUUID().replace(/-/g, "");
+    }
+  } catch {
+    // ignore
+  }
+  if (!sid) {
+    sid = Array.from({ length: 32 }, () =>
+      Math.floor(Math.random() * 16).toString(16),
+    ).join("");
+  }
+  try {
+    window.localStorage.setItem(SESSION_KEY, sid);
+  } catch {
+    // ignore
+  }
+  return sid;
+}
+
 const INITIAL: Entry[] = [
-  {
-    kind: "out",
-    text: "aeon·terminal · v0.1.0 · session-0001",
-    tone: "muted",
-  },
   {
     kind: "out",
     text: "type 'help' for available commands.",
     tone: "muted",
   },
 ];
+
+// useSyncExternalStore is the SSR-safe way to read browser-only state
+// (localStorage in our case): the server snapshot returns an empty id, the
+// client snapshot returns the real one, and React handles hydration cleanly.
+const noopSubscribe = () => () => {};
+const serverSnapshot = () => "";
 
 const DEFAULT_ENABLED = new Set([
   "morning-brief",
@@ -65,6 +101,15 @@ export function InteractiveTerminal() {
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  // Stable per-browser session id, persisted in localStorage. Resolved
+  // client-side; the empty string during SSR avoids hydration mismatches.
+  const sessionId = useSyncExternalStore(
+    noopSubscribe,
+    loadOrCreateSessionId,
+    serverSnapshot,
+  );
+  const sessionLabel = sessionId ? `session-${sessionId.slice(0, 8)}` : "";
 
   const skillBySlug = useMemo(() => {
     const m = new Map<string, Skill>();
@@ -112,9 +157,13 @@ export function InteractiveTerminal() {
       abortRef.current = controller;
       print("", "info");
       try {
+        const headers: Record<string, string> = {
+          "content-type": "application/json",
+        };
+        if (sessionId) headers["x-session-id"] = sessionId;
         const res = await fetch("/api/exec", {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers,
           body: JSON.stringify({ mode, skill: skillSlug, prompt }),
           signal: controller.signal,
         });
@@ -168,8 +217,91 @@ export function InteractiveTerminal() {
         abortRef.current = null;
       }
     },
-    [appendToLast, print, streaming],
+    [appendToLast, print, sessionId, streaming],
   );
+
+  const fetchMemory = useCallback(async () => {
+    if (!sessionId) {
+      print("memory: session not initialized", "warn");
+      return;
+    }
+    try {
+      const res = await fetch("/api/memory", {
+        method: "GET",
+        headers: { "x-session-id": sessionId },
+      });
+      if (!res.ok) {
+        print(`memory: api error ${res.status}`, "err");
+        return;
+      }
+      const data = (await res.json()) as {
+        enabled: boolean;
+        turns: { user: string; assistant: string; ts?: string }[];
+        runs: { skill: string; summary: string; ts?: string }[];
+      };
+      if (!data.enabled) {
+        print(
+          "memory: disabled (AEON_MEMORY KV binding not configured on the worker)",
+          "warn",
+        );
+        return;
+      }
+      print(
+        `session: ${sessionId.slice(0, 8)}… · turns: ${data.turns.length} · runs: ${data.runs.length}`,
+        "muted",
+      );
+      if (data.turns.length === 0 && data.runs.length === 0) {
+        print("  (empty — ask or run something to start remembering)", "muted");
+        return;
+      }
+      if (data.turns.length) {
+        print("");
+        print("recent conversation:", "info");
+        for (const t of data.turns.slice(-3)) {
+          print(`  ${t.ts ?? ""}  ${truncOneLine(t.user, 60)}`, "muted");
+        }
+      }
+      if (data.runs.length) {
+        print("");
+        print("recent skill runs:", "info");
+        for (const r of data.runs.slice(-3)) {
+          print(
+            `  ${r.ts ?? ""}  ${pad(r.skill, 22)}  ${truncOneLine(r.summary, 50)}`,
+            "muted",
+          );
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      print(`memory: ${msg}`, "err");
+    }
+  }, [print, sessionId]);
+
+  const clearMemory = useCallback(async () => {
+    if (!sessionId) {
+      print("memory: session not initialized", "warn");
+      return;
+    }
+    try {
+      const res = await fetch("/api/memory", {
+        method: "DELETE",
+        headers: { "x-session-id": sessionId },
+      });
+      if (!res.ok) {
+        print(`memory: api error ${res.status}`, "err");
+        return;
+      }
+      const data = (await res.json()) as { enabled: boolean; ok: boolean };
+      if (!data.enabled) {
+        print("memory: disabled (no KV binding)", "warn");
+        return;
+      }
+      print("✓ memory cleared for this session", "ok");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      print(`memory: ${msg}`, "err");
+    }
+  }, [print, sessionId]);
 
   const exec = useCallback(
     (raw: string) => {
@@ -189,10 +321,19 @@ export function InteractiveTerminal() {
         case "whoami":
           print("operator · plan: solo · region: lo-fi-1", "muted");
           print(
-            "agent identity loaded from ./soul · voice: STYLE.md · memory: ./memory",
+            `session: ${sessionId ? sessionId.slice(0, 8) + "…" : "—"} · voice: STYLE.md · memory: kv://AEON_MEMORY`,
             "muted",
           );
           return;
+        case "memory": {
+          const sub = rest[0];
+          if (sub === "clear" || sub === "reset" || sub === "wipe") {
+            void clearMemory();
+          } else {
+            void fetchMemory();
+          }
+          return;
+        }
         case "skills": {
           const filter = rest[0];
           const rows = SKILLS.filter((s) => !filter || s.category === filter);
@@ -347,7 +488,16 @@ export function InteractiveTerminal() {
           );
       }
     },
-    [enabled, print, printCmd, runStream, skillBySlug],
+    [
+      clearMemory,
+      enabled,
+      fetchMemory,
+      print,
+      printCmd,
+      runStream,
+      sessionId,
+      skillBySlug,
+    ],
   );
 
   const onSubmit = useCallback(
@@ -402,6 +552,10 @@ export function InteractiveTerminal() {
         ref={scrollRef}
         className="no-scrollbar h-[560px] overflow-y-auto px-4 py-3 sm:px-5"
       >
+        <div className="text-muted">
+          aeon·terminal · v0.1.0
+          {sessionLabel ? ` · ${sessionLabel}` : ""}
+        </div>
         {entries.map((e, i) =>
           e.kind === "cmd" ? (
             <div key={i} className="flex">
@@ -462,6 +616,12 @@ function pad(s: string, n: number): string {
   return s.length >= n ? s : s + " ".repeat(n - s.length);
 }
 
+function truncOneLine(s: string | undefined, n: number): string {
+  const text = String(s ?? "").replace(/\s+/g, " ").trim();
+  if (text.length <= n) return text;
+  return text.slice(0, n - 1) + "…";
+}
+
 function rand(a: number, b: number): number {
   return Math.floor(a + Math.random() * (b - a + 1));
 }
@@ -495,6 +655,7 @@ const COMMANDS = [
   "cat",
   "run",
   "ask",
+  "memory",
   "schedule",
   "enable",
   "disable",
