@@ -704,10 +704,36 @@ function previewArgs(input) {
   }
 }
 
+const CANONICAL_HOST = "aeonterminal.org";
+
+const HOST_REDIRECTS = {
+  // terminal.aeonterminal.org → aeonterminal.org/terminal/ (apex landing on /terminal)
+  "terminal.aeonterminal.org": "/terminal/",
+};
+
+function redirectToCanonical(url, basePath) {
+  const target = new URL(url.toString());
+  target.hostname = CANONICAL_HOST;
+  target.port = "";
+  if (basePath && (url.pathname === "/" || url.pathname === "")) {
+    target.pathname = basePath;
+  }
+  return Response.redirect(target.toString(), 302);
+}
+
 const worker = {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    // /api/exec is served on every hostname (subdomain pages call it too)
     if (url.pathname === "/api/exec") return handleExec(request, env);
+
+    // Brand subdomains: redirect to canonical apex so we have one source of truth.
+    const hostRule = HOST_REDIRECTS[url.hostname];
+    if (hostRule !== undefined) {
+      return redirectToCanonical(url, hostRule);
+    }
+
     return env.ASSETS.fetch(request);
   },
 };
