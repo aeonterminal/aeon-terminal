@@ -705,6 +705,13 @@ async function handleExec(request, env) {
     } finally {
       // Persist memory only on successful completion and only when we have a
       // session id + binding. Failures and cancellations do not write.
+      const debug = {
+        completed,
+        hasSid: Boolean(sid),
+        hasBinding: Boolean(env.AEON_MEMORY),
+        textLen: finalAssistantText.length,
+        mode,
+      };
       if (completed && sid && env.AEON_MEMORY) {
         try {
           const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
@@ -718,6 +725,7 @@ async function handleExec(request, env) {
               },
             ].slice(-MEM_MAX_TURNS);
             await memWrite(env, sid, "turns", turns);
+            debug.wrote = "turns:" + turns.length;
           } else if (mode === "run") {
             const runs = [
               ...mem.runs,
@@ -729,10 +737,16 @@ async function handleExec(request, env) {
               },
             ].slice(-MEM_MAX_RUNS);
             await memWrite(env, sid, "runs", runs);
+            debug.wrote = "runs:" + runs.length;
           }
-        } catch {
-          // swallow — memory write is best-effort
+        } catch (err) {
+          debug.error = err && err.message ? String(err.message).slice(0, 100) : "unknown";
         }
+      }
+      try {
+        await sendEvent({ type: "mem_debug", ...debug });
+      } catch {
+        // ignore
       }
       try {
         await writer.close();
