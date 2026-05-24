@@ -2790,9 +2790,19 @@ async function handleStatus(request, env) {
       return {};
     }),
     github: await probeWithTimeout("github", async () => {
-      const res = await fetch("https://api.github.com/zen", {
-        cf: { cacheTtl: 0 },
-      });
+      // GitHub's API rejects requests without a User-Agent header and applies
+      // strict per-IP rate limits to anonymous worker traffic. Hitting the
+      // repo we already render on the home page keeps the probe meaningful.
+      const res = await fetch(
+        "https://api.github.com/repos/aeonterminal/aeon-terminal",
+        {
+          headers: {
+            "user-agent": "aeonterminal-status/1.0 (+https://aeonterminal.org/status)",
+            accept: "application/vnd.github+json",
+          },
+          cf: { cacheTtl: 0 },
+        },
+      );
       if (!res.ok) throw new Error(`http_${res.status}`);
       return {};
     }),
