@@ -8,7 +8,6 @@ import {
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
 } from "react";
 import { CATEGORIES, SKILLS, type Skill } from "@/lib/skills";
 
@@ -17,16 +16,34 @@ type Entry =
   | { kind: "cmd"; text: string }
   | { kind: "out"; text: string; tone?: Tone };
 
+type AuthUser = {
+  id: string;
+  email: string | null;
+  name: string | null;
+  avatar_url: string | null;
+  provider: string | null;
+  plan: string;
+};
+
+type Usage = {
+  day: string;
+  asks: number;
+  runs: number;
+  limits: { asks: number; runs: number };
+};
+
 const HELP = `Available commands:
   help                       — show this help
   whoami                     — describe the active agent + session
+  login                      — open the sign-in page
+  signout                    — end this session
   skills [category]          — list skills (filter by category)
   cat <skill>                — show a skill spec
   run <skill> [prompt...]    — execute a skill via Claude (real LLM)
   run <skill> --mock         — execute a skill with mock output (offline)
   ask <question...>          — free-form prompt to the agent
-  memory                     — show what the agent remembers this session
-  memory clear               — wipe this session's memory
+  memory                     — show what the agent remembers (signed-in only)
+  memory clear               — wipe your memory (signed-in only)
   schedule                   — show the cron table for enabled skills
   enable <skill>             — enable a skill
   disable <skill>            — disable a skill
@@ -35,38 +52,6 @@ const HELP = `Available commands:
   clear                      — clear the screen
   exit                       — disconnect (no-op)`;
 
-const SESSION_KEY = "aeon.sid";
-
-function loadOrCreateSessionId(): string {
-  if (typeof window === "undefined") return "";
-  try {
-    const existing = window.localStorage.getItem(SESSION_KEY);
-    if (existing && /^[A-Za-z0-9_-]{8,64}$/.test(existing)) return existing;
-  } catch {
-    // localStorage may be unavailable (private mode, etc)
-  }
-  // Prefer crypto.randomUUID when available; fall back to a short random hex.
-  let sid = "";
-  try {
-    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-      sid = crypto.randomUUID().replace(/-/g, "");
-    }
-  } catch {
-    // ignore
-  }
-  if (!sid) {
-    sid = Array.from({ length: 32 }, () =>
-      Math.floor(Math.random() * 16).toString(16),
-    ).join("");
-  }
-  try {
-    window.localStorage.setItem(SESSION_KEY, sid);
-  } catch {
-    // ignore
-  }
-  return sid;
-}
-
 const INITIAL: Entry[] = [
   {
     kind: "out",
@@ -74,12 +59,6 @@ const INITIAL: Entry[] = [
     tone: "muted",
   },
 ];
-
-// useSyncExternalStore is the SSR-safe way to read browser-only state
-// (localStorage in our case): the server snapshot returns an empty id, the
-// client snapshot returns the real one, and React handles hydration cleanly.
-const noopSubscribe = () => () => {};
-const serverSnapshot = () => "";
 
 const DEFAULT_ENABLED = new Set([
   "morning-brief",
@@ -98,18 +77,50 @@ export function InteractiveTerminal() {
   const [history, setHistory] = useState<string[]>([]);
   const [historyIdx, setHistoryIdx] = useState<number>(-1);
   const [streaming, setStreaming] = useState(false);
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [usage, setUsage] = useState<Usage | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Stable per-browser session id, persisted in localStorage. Resolved
-  // client-side; the empty string during SSR avoids hydration mismatches.
-  const sessionId = useSyncExternalStore(
-    noopSubscribe,
-    loadOrCreateSessionId,
-    serverSnapshot,
-  );
-  const sessionLabel = sessionId ? `session-${sessionId.slice(0, 8)}` : "";
+  const sessionLabel = authUser
+    ? `${authUser.name || authUser.email || authUser.id.slice(0, 8)} · plan:${authUser.plan}`
+    : "anonymous";
+
+  const refreshMe = useCallback(async () => {
+    try {
+      const res = await fetch("/api/me", { credentials: "include" });
+      if (!res.ok) return;
+      const data = (await res.json()) as { user: AuthUser | null; usage?: Usage | null };
+      setAuthUser(data.user);
+      setUsage(data.usage ?? null);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetch("/api/me", { credentials: "include" });
+        if (cancelled || !res.ok) return;
+        const data = (await res.json()) as {
+          user: AuthUser | null;
+          usage?: Usage | null;
+        };
+        if (cancelled) return;
+        setAuthUser(data.user);
+        setUsage(data.usage ?? null);
+      } catch {
+        // ignore
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const skillBySlug = useMemo(() => {
     const m = new Map<string, Skill>();
@@ -157,13 +168,10 @@ export function InteractiveTerminal() {
       abortRef.current = controller;
       print("", "info");
       try {
-        const headers: Record<string, string> = {
-          "content-type": "application/json",
-        };
-        if (sessionId) headers["x-session-id"] = sessionId;
         const res = await fetch("/api/exec", {
           method: "POST",
-          headers,
+          headers: { "content-type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({ mode, skill: skillSlug, prompt }),
           signal: controller.signal,
         });
@@ -215,20 +223,18 @@ export function InteractiveTerminal() {
       } finally {
         setStreaming(false);
         abortRef.current = null;
+        // Refresh usage counters after each call so the badge stays accurate.
+        void refreshMe();
       }
     },
-    [appendToLast, print, sessionId, streaming],
+    [appendToLast, print, refreshMe, streaming],
   );
 
   const fetchMemory = useCallback(async () => {
-    if (!sessionId) {
-      print("memory: session not initialized", "warn");
-      return;
-    }
     try {
       const res = await fetch("/api/memory", {
         method: "GET",
-        headers: { "x-session-id": sessionId },
+        credentials: "include",
       });
       if (!res.ok) {
         print(`memory: api error ${res.status}`, "err");
@@ -241,15 +247,21 @@ export function InteractiveTerminal() {
         runs: { skill: string; summary: string; ts?: string }[];
       };
       if (!data.enabled) {
-        const hint =
-          data.reason === "binding_not_kv"
-            ? "wrong binding type \u2014 wire AEON_MEMORY as a KV Namespace Binding (not a text variable)"
-            : "no AEON_MEMORY KV binding configured on the worker";
-        print(`memory: disabled (${hint})`, "warn");
+        if (data.reason === "not_signed_in") {
+          print(
+            "memory: sign in to enable per-user memory (run 'login')",
+            "warn",
+          );
+        } else {
+          print(
+            `memory: disabled (${data.reason || "unavailable"})`,
+            "warn",
+          );
+        }
         return;
       }
       print(
-        `session: ${sessionId.slice(0, 8)}… · turns: ${data.turns.length} · runs: ${data.runs.length}`,
+        `turns: ${data.turns.length} · runs: ${data.runs.length}`,
         "muted",
       );
       if (data.turns.length === 0 && data.runs.length === 0) {
@@ -277,33 +289,52 @@ export function InteractiveTerminal() {
       const msg = err instanceof Error ? err.message : String(err);
       print(`memory: ${msg}`, "err");
     }
-  }, [print, sessionId]);
+  }, [print]);
 
   const clearMemory = useCallback(async () => {
-    if (!sessionId) {
-      print("memory: session not initialized", "warn");
-      return;
-    }
     try {
       const res = await fetch("/api/memory", {
         method: "DELETE",
-        headers: { "x-session-id": sessionId },
+        credentials: "include",
       });
+      if (res.status === 401) {
+        print("memory: sign in first (run 'login')", "warn");
+        return;
+      }
       if (!res.ok) {
         print(`memory: api error ${res.status}`, "err");
         return;
       }
       const data = (await res.json()) as { enabled: boolean; ok: boolean };
       if (!data.enabled) {
-        print("memory: disabled (no KV binding)", "warn");
+        print("memory: disabled", "warn");
         return;
       }
-      print("✓ memory cleared for this session", "ok");
+      print("✓ memory cleared", "ok");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       print(`memory: ${msg}`, "err");
     }
-  }, [print, sessionId]);
+  }, [print]);
+
+  const signOut = useCallback(async () => {
+    try {
+      const res = await fetch("/api/auth/logout", {
+        method: "POST",
+        credentials: "include",
+      });
+      if (!res.ok) {
+        print(`signout: api error ${res.status}`, "err");
+        return;
+      }
+      setAuthUser(null);
+      setUsage(null);
+      print("✓ signed out", "ok");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      print(`signout: ${msg}`, "err");
+    }
+  }, [print]);
 
   const exec = useCallback(
     (raw: string) => {
@@ -321,11 +352,44 @@ export function InteractiveTerminal() {
           print(HELP, "muted");
           return;
         case "whoami":
-          print("operator · plan: solo · region: lo-fi-1", "muted");
-          print(
-            `session: ${sessionId ? sessionId.slice(0, 8) + "…" : "—"} · voice: STYLE.md · memory: kv://AEON_MEMORY`,
-            "muted",
-          );
+          if (authUser) {
+            const id = authUser.name || authUser.email || authUser.id;
+            print(
+              `${id} · plan: ${authUser.plan} · via: ${authUser.provider || "?"}`,
+              "muted",
+            );
+            if (usage) {
+              print(
+                `usage today: ${usage.asks}/${usage.limits.asks} asks · ${usage.runs}/${usage.limits.runs} runs`,
+                "muted",
+              );
+            }
+            print("memory: d1://aeon_terminal", "muted");
+          } else {
+            print("anonymous · plan: guest · region: lo-fi-1", "muted");
+            print(
+              "memory: disabled · run 'login' to claim an agent",
+              "muted",
+            );
+          }
+          return;
+        case "login":
+          if (authUser) {
+            print(
+              `already signed in as ${authUser.name || authUser.email}. run 'signout' first.`,
+              "muted",
+            );
+            return;
+          }
+          print("→ opening /login", "info");
+          window.location.assign("/login");
+          return;
+        case "signout":
+          if (!authUser) {
+            print("already anonymous", "muted");
+            return;
+          }
+          void signOut();
           return;
         case "memory": {
           const sub = rest[0];
@@ -491,14 +555,16 @@ export function InteractiveTerminal() {
       }
     },
     [
+      authUser,
       clearMemory,
       enabled,
       fetchMemory,
       print,
       printCmd,
       runStream,
-      sessionId,
+      signOut,
       skillBySlug,
+      usage,
     ],
   );
 

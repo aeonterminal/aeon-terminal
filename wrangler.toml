@@ -9,8 +9,18 @@ directory = "./out"
 not_found_handling = "404-page"
 run_worker_first = true
 
-# Optional binding (configured via Cloudflare dashboard, not declared here so
-# Git-based deploys don't fail on a missing namespace id):
-#   AEON_MEMORY — KV namespace for per-session memory.
-# The Worker reads/writes this binding only if it is present; it degrades to
-# stateless mode otherwise. See README for setup steps.
+# Per-user state lives in Cloudflare D1 (SQLite). The worker calls
+# ensureSchema() on first use, so no manual migrations are required.
+[[d1_databases]]
+binding = "DB"
+database_name = "aeon_terminal"
+database_id = "3dc3f1e5-eef7-46e2-a374-11a1cdc98be4"
+
+# Secrets configured via Cloudflare dashboard (Settings → Variables and Secrets):
+#   ANTHROPIC_API_KEY     — Claude API key
+#   GOOGLE_CLIENT_ID      — Google OAuth 2.0 client id
+#   GOOGLE_CLIENT_SECRET  — Google OAuth 2.0 client secret
+#   GITHUB_CLIENT_ID      — GitHub OAuth 2.0 client id
+#   GITHUB_CLIENT_SECRET  — GitHub OAuth 2.0 client secret
+#   RESEND_API_KEY        — Resend API key for email magic links
+#   EMAIL_FROM            — (optional) From address, defaults to "Aeon Terminal <login@aeonterminal.org>"

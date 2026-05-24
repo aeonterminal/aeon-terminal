@@ -301,6 +301,18 @@ const CORS = {
   "access-control-allow-headers": "content-type, x-session-id",
 };
 
+// Per-plan quotas (asks + skill runs per UTC day). Anonymous users fall back
+// to the legacy IP-based rate limit.
+const PLAN_LIMITS = {
+  free: { asks: 30, runs: 10 },
+  paid: { asks: 200, runs: 50 },
+};
+
+const SESSION_COOKIE = "aeon_session";
+const SESSION_TTL_DAYS = 30;
+const OAUTH_STATE_TTL_SECONDS = 600;
+const AUTH_REDIRECT_AFTER_LOGIN = "/terminal";
+
 function json(data, init = {}) {
   return new Response(JSON.stringify(data), {
     ...init,
@@ -607,21 +619,42 @@ async function handleExec(request, env) {
     return json({ error: "unknown_skill" }, { status: 400 });
   }
 
-  const ip = request.headers.get("cf-connecting-ip");
-  const limit = await checkRateLimit(ip);
-  if (!limit.ok) {
-    return json(
-      {
-        error: "rate_limited",
-        message: "30 requests/day per IP. Try tomorrow or self-host.",
-      },
-      { status: 429 },
-    );
+  // Authenticated users get per-user memory + per-plan daily quota.
+  // Anonymous users keep the legacy IP-based rate limit and no memory.
+  const user = await currentUser(request, env);
+  let limit;
+  if (user) {
+    try {
+      limit = await dbCheckAndBumpUsage(env, user.id, mode, user.plan);
+    } catch {
+      limit = { ok: true, remaining: null };
+    }
+    if (!limit.ok) {
+      return json(
+        {
+          error: "rate_limited",
+          message: `${mode === "ask" ? "asks" : "runs"}: ${limit.used}/${limit.limit} used today (${limit.plan}). Resets at UTC midnight.`,
+        },
+        { status: 429 },
+      );
+    }
+  } else {
+    const ip = request.headers.get("cf-connecting-ip");
+    limit = await checkRateLimit(ip);
+    if (!limit.ok) {
+      return json(
+        {
+          error: "rate_limited",
+          message: "30 requests/day per IP. Sign in for higher limits.",
+        },
+        { status: 429 },
+      );
+    }
   }
 
-  const sid = sanitizeSid(request.headers.get("x-session-id"));
-  const kvOk = hasKv(env);
-  const mem = await memRead(env, sid);
+  const mem = user
+    ? await dbGetMemory(env, user.id).catch(() => ({ turns: [], runs: [] }))
+    : { turns: [], runs: [] };
 
   let system = buildSystem(skill, mode);
   if (mode === "run") {
@@ -704,32 +737,14 @@ async function handleExec(request, env) {
       const msg = err && err.message ? err.message : String(err);
       await sendEvent({ type: "error", message: msg.slice(0, 200) });
     } finally {
-      // Persist memory only on successful completion when KV is wired up.
-      // Failures and cancellations skip the write.
-      if (completed && sid && kvOk) {
+      // Persist memory only on successful completion, only for authenticated
+      // users. Failures and cancellations skip the write.
+      if (completed && user && hasDb(env) && finalAssistantText) {
         try {
-          const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
           if (mode === "ask") {
-            const turns = [
-              ...mem.turns,
-              {
-                user: trunc(prompt, MEM_TRUNC_USER),
-                assistant: trunc(finalAssistantText, MEM_TRUNC_ASSISTANT),
-                ts,
-              },
-            ].slice(-MEM_MAX_TURNS);
-            await memWrite(env, sid, "turns", turns);
-          } else if (mode === "run") {
-            const runs = [
-              ...mem.runs,
-              {
-                skill,
-                prompt: trunc(prompt, MEM_TRUNC_USER),
-                summary: trunc(finalAssistantText, MEM_TRUNC_ASSISTANT),
-                ts,
-              },
-            ].slice(-MEM_MAX_RUNS);
-            await memWrite(env, sid, "runs", runs);
+            await dbAppendTurn(env, user.id, prompt, finalAssistantText);
+          } else if (mode === "run" && skill) {
+            await dbAppendRun(env, user.id, skill, prompt, finalAssistantText);
           }
         } catch {
           // swallow — memory write is best-effort
@@ -753,82 +768,832 @@ async function handleExec(request, env) {
   });
 }
 
-// --- session memory (optional, backed by KV) ---
+// --- D1 schema + auth + per-user memory ---
 
-// Session id is supplied by the browser via the X-Session-Id header. It is
-// opaque to the worker; we only use it as a key prefix. Validate to keep
-// KV keys bounded and printable.
-function sanitizeSid(raw) {
-  if (!raw || typeof raw !== "string") return null;
-  const s = raw.trim();
-  if (s.length < 8 || s.length > 64) return null;
-  if (!/^[A-Za-z0-9_-]+$/.test(s)) return null;
-  return s;
-}
-
-const MEM_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
-const MEM_MAX_TURNS = 5;                  // ask: last N user/assistant pairs
-const MEM_MAX_RUNS = 10;                  // run: last N skill executions (any skill)
+const MEM_MAX_TURNS = 5; // ask: last N user/assistant pairs
+const MEM_MAX_RUNS = 10; // run: last N skill executions
 const MEM_TRUNC_USER = 500;
 const MEM_TRUNC_ASSISTANT = 1200;
 
-function memKey(sid, kind) {
-  return `mem:${sid}:${kind}`;
+function hasDb(env) {
+  return !!(env && env.DB && typeof env.DB.prepare === "function");
 }
 
-// A real KV namespace binding exposes get/put/delete as functions. If the
-// binding was wired up as a plain text variable by mistake, env.AEON_MEMORY
-// will be a string and these calls will throw. Guard up front.
-function hasKv(env) {
-  const kv = env && env.AEON_MEMORY;
-  return (
-    !!kv &&
-    typeof kv === "object" &&
-    typeof kv.get === "function" &&
-    typeof kv.put === "function" &&
-    typeof kv.delete === "function"
-  );
-}
+let schemaReady = false;
 
-async function memRead(env, sid) {
-  if (!hasKv(env) || !sid) return { turns: [], runs: [] };
-  try {
-    const [turnsRaw, runsRaw] = await Promise.all([
-      env.AEON_MEMORY.get(memKey(sid, "turns")),
-      env.AEON_MEMORY.get(memKey(sid, "runs")),
-    ]);
-    const turns = turnsRaw ? JSON.parse(turnsRaw) : [];
-    const runs = runsRaw ? JSON.parse(runsRaw) : [];
-    return {
-      turns: Array.isArray(turns) ? turns : [],
-      runs: Array.isArray(runs) ? runs : [],
-    };
-  } catch {
-    return { turns: [], runs: [] };
+async function ensureSchema(env) {
+  if (schemaReady || !hasDb(env)) return;
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT,
+      name TEXT,
+      avatar_url TEXT,
+      primary_provider TEXT,
+      plan TEXT NOT NULL DEFAULT 'free',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)`,
+    `CREATE TABLE IF NOT EXISTS user_providers (
+      provider TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      external_login TEXT,
+      external_email TEXT,
+      avatar_url TEXT,
+      access_token TEXT,
+      refresh_token TEXT,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (provider, external_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_user_providers_user ON user_providers(user_id)`,
+    `CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      ip TEXT,
+      user_agent TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
+    `CREATE TABLE IF NOT EXISTS memory_turns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      user_msg TEXT NOT NULL,
+      assistant_msg TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_memory_turns_user_time ON memory_turns(user_id, created_at)`,
+    `CREATE TABLE IF NOT EXISTS memory_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id TEXT NOT NULL,
+      skill TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_memory_runs_user_time ON memory_runs(user_id, created_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_memory_runs_user_skill ON memory_runs(user_id, skill, created_at)`,
+    `CREATE TABLE IF NOT EXISTS usage_daily (
+      user_id TEXT NOT NULL,
+      day TEXT NOT NULL,
+      asks INTEGER NOT NULL DEFAULT 0,
+      runs INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (user_id, day)
+    )`,
+    `CREATE TABLE IF NOT EXISTS oauth_states (
+      state TEXT PRIMARY KEY,
+      provider TEXT NOT NULL,
+      code_verifier TEXT,
+      redirect_to TEXT,
+      expires_at INTEGER NOT NULL
+    )`,
+    `CREATE TABLE IF NOT EXISTS email_login_tokens (
+      token TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      redirect_to TEXT,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      consumed_at INTEGER
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_email_tokens_email ON email_login_tokens(email)`,
+  ];
+  for (const sql of statements) {
+    await env.DB.prepare(sql).run();
   }
+  schemaReady = true;
 }
 
-async function memWrite(env, sid, kind, value) {
-  if (!hasKv(env) || !sid) return;
+function nowSec() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function newId() {
+  return crypto.randomUUID();
+}
+
+function newToken() {
+  const buf = new Uint8Array(32);
+  crypto.getRandomValues(buf);
+  return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function utcDay(ts = nowSec()) {
+  return new Date(ts * 1000).toISOString().slice(0, 10);
+}
+
+function b64urlEncode(buf) {
+  const bin = String.fromCharCode(...new Uint8Array(buf));
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function sha256(input) {
+  const buf = new TextEncoder().encode(input);
+  return crypto.subtle.digest("SHA-256", buf);
+}
+
+async function pkcePair() {
+  const verifier = newToken() + newToken();
+  const challenge = b64urlEncode(await sha256(verifier));
+  return { verifier, challenge };
+}
+
+// --- D1: users + providers ---
+
+async function dbUpsertOAuthUser(env, profile) {
+  const ts = nowSec();
+  let userId;
+
+  const existing = await env.DB
+    .prepare(`SELECT user_id FROM user_providers WHERE provider = ? AND external_id = ?`)
+    .bind(profile.provider, profile.externalId)
+    .first();
+
+  if (existing) {
+    userId = existing.user_id;
+    await env.DB
+      .prepare(
+        `UPDATE user_providers
+            SET external_login = ?, external_email = ?, avatar_url = ?,
+                access_token = ?, refresh_token = ?
+          WHERE provider = ? AND external_id = ?`,
+      )
+      .bind(
+        profile.externalLogin || null,
+        profile.email || null,
+        profile.avatarUrl || null,
+        profile.accessToken || null,
+        profile.refreshToken || null,
+        profile.provider,
+        profile.externalId,
+      )
+      .run();
+    await env.DB
+      .prepare(
+        `UPDATE users
+            SET name = COALESCE(?, name),
+                avatar_url = COALESCE(?, avatar_url),
+                updated_at = ?
+          WHERE id = ?`,
+      )
+      .bind(profile.name || null, profile.avatarUrl || null, ts, userId)
+      .run();
+    return userId;
+  }
+
+  if (profile.email) {
+    const sameEmail = await env.DB
+      .prepare(`SELECT id FROM users WHERE email = ?`)
+      .bind(profile.email)
+      .first();
+    if (sameEmail) userId = sameEmail.id;
+  }
+
+  if (!userId) {
+    userId = newId();
+    await env.DB
+      .prepare(
+        `INSERT INTO users (id, email, name, avatar_url, primary_provider, plan, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'free', ?, ?)`,
+      )
+      .bind(
+        userId,
+        profile.email || null,
+        profile.name || profile.externalLogin || null,
+        profile.avatarUrl || null,
+        profile.provider,
+        ts,
+        ts,
+      )
+      .run();
+  }
+
+  await env.DB
+    .prepare(
+      `INSERT OR REPLACE INTO user_providers
+         (provider, external_id, user_id, external_login, external_email, avatar_url, access_token, refresh_token, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      profile.provider,
+      profile.externalId,
+      userId,
+      profile.externalLogin || null,
+      profile.email || null,
+      profile.avatarUrl || null,
+      profile.accessToken || null,
+      profile.refreshToken || null,
+      ts,
+    )
+    .run();
+
+  return userId;
+}
+
+async function dbUpsertEmailUser(env, email) {
+  const ts = nowSec();
+  const existing = await env.DB
+    .prepare(`SELECT id FROM users WHERE email = ?`)
+    .bind(email)
+    .first();
+  if (existing) return existing.id;
+  const userId = newId();
+  await env.DB
+    .prepare(
+      `INSERT INTO users (id, email, name, avatar_url, primary_provider, plan, created_at, updated_at)
+       VALUES (?, ?, ?, NULL, 'email', 'free', ?, ?)`,
+    )
+    .bind(userId, email, email.split("@")[0], ts, ts)
+    .run();
+  return userId;
+}
+
+// --- D1: sessions ---
+
+async function dbCreateSession(env, userId, request) {
+  const token = newToken();
+  const ts = nowSec();
+  const expires = ts + SESSION_TTL_DAYS * 24 * 60 * 60;
+  const ip = request.headers.get("cf-connecting-ip") || null;
+  const ua = (request.headers.get("user-agent") || "").slice(0, 200);
+  await env.DB
+    .prepare(
+      `INSERT INTO sessions (token, user_id, expires_at, created_at, ip, user_agent)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(token, userId, expires, ts, ip, ua)
+    .run();
+  return { token, expires };
+}
+
+async function dbGetSessionUser(env, token) {
+  if (!token) return null;
+  const row = await env.DB
+    .prepare(
+      `SELECT u.id, u.email, u.name, u.avatar_url, u.primary_provider, u.plan, s.expires_at
+         FROM sessions s
+         JOIN users u ON u.id = s.user_id
+        WHERE s.token = ? AND s.expires_at > ?`,
+    )
+    .bind(token, nowSec())
+    .first();
+  return row || null;
+}
+
+async function dbDeleteSession(env, token) {
+  if (!token) return;
+  await env.DB.prepare(`DELETE FROM sessions WHERE token = ?`).bind(token).run();
+}
+
+// --- D1: memory ---
+
+async function dbGetMemory(env, userId) {
+  const [turnsRes, runsRes] = await Promise.all([
+    env.DB
+      .prepare(
+        `SELECT user_msg, assistant_msg, created_at
+           FROM memory_turns WHERE user_id = ?
+           ORDER BY created_at DESC LIMIT ?`,
+      )
+      .bind(userId, MEM_MAX_TURNS)
+      .all(),
+    env.DB
+      .prepare(
+        `SELECT skill, prompt, summary, created_at
+           FROM memory_runs WHERE user_id = ?
+           ORDER BY created_at DESC LIMIT ?`,
+      )
+      .bind(userId, MEM_MAX_RUNS)
+      .all(),
+  ]);
+  const turns = (turnsRes.results || []).reverse().map((r) => ({
+    user: r.user_msg,
+    assistant: r.assistant_msg,
+    ts: new Date(r.created_at * 1000).toISOString().slice(0, 16).replace("T", " "),
+  }));
+  const runs = (runsRes.results || []).reverse().map((r) => ({
+    skill: r.skill,
+    prompt: r.prompt,
+    summary: r.summary,
+    ts: new Date(r.created_at * 1000).toISOString().slice(0, 16).replace("T", " "),
+  }));
+  return { turns, runs };
+}
+
+async function dbAppendTurn(env, userId, userMsg, assistantMsg) {
+  await env.DB
+    .prepare(
+      `INSERT INTO memory_turns (user_id, user_msg, assistant_msg, created_at)
+       VALUES (?, ?, ?, ?)`,
+    )
+    .bind(
+      userId,
+      trunc(userMsg, MEM_TRUNC_USER),
+      trunc(assistantMsg, MEM_TRUNC_ASSISTANT),
+      nowSec(),
+    )
+    .run();
+  await env.DB
+    .prepare(
+      `DELETE FROM memory_turns WHERE user_id = ? AND id NOT IN (
+         SELECT id FROM memory_turns WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+       )`,
+    )
+    .bind(userId, userId, MEM_MAX_TURNS)
+    .run();
+}
+
+async function dbAppendRun(env, userId, skill, prompt, summary) {
+  await env.DB
+    .prepare(
+      `INSERT INTO memory_runs (user_id, skill, prompt, summary, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      userId,
+      skill,
+      trunc(prompt, MEM_TRUNC_USER),
+      trunc(summary, MEM_TRUNC_ASSISTANT),
+      nowSec(),
+    )
+    .run();
+  await env.DB
+    .prepare(
+      `DELETE FROM memory_runs WHERE user_id = ? AND id NOT IN (
+         SELECT id FROM memory_runs WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+       )`,
+    )
+    .bind(userId, userId, MEM_MAX_RUNS)
+    .run();
+}
+
+async function dbClearMemory(env, userId) {
+  await env.DB.batch([
+    env.DB.prepare(`DELETE FROM memory_turns WHERE user_id = ?`).bind(userId),
+    env.DB.prepare(`DELETE FROM memory_runs WHERE user_id = ?`).bind(userId),
+  ]);
+}
+
+// --- D1: quota ---
+
+async function dbCheckAndBumpUsage(env, userId, kind, plan) {
+  const day = utcDay();
+  const limits = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
+  const limit = kind === "ask" ? limits.asks : limits.runs;
+  const col = kind === "ask" ? "asks" : "runs";
+  const row = await env.DB
+    .prepare(
+      `INSERT INTO usage_daily (user_id, day, ${col}) VALUES (?, ?, 1)
+       ON CONFLICT(user_id, day) DO UPDATE SET ${col} = ${col} + 1
+       RETURNING asks, runs`,
+    )
+    .bind(userId, day)
+    .first();
+  const used = row[col];
+  if (used > limit) {
+    await env.DB
+      .prepare(`UPDATE usage_daily SET ${col} = ${col} - 1 WHERE user_id = ? AND day = ?`)
+      .bind(userId, day)
+      .run();
+    return { ok: false, used: used - 1, limit, plan, remaining: 0 };
+  }
+  return { ok: true, used, limit, plan, remaining: limit - used };
+}
+
+async function dbGetUsage(env, userId, plan) {
+  const day = utcDay();
+  const row = await env.DB
+    .prepare(`SELECT asks, runs FROM usage_daily WHERE user_id = ? AND day = ?`)
+    .bind(userId, day)
+    .first();
+  const limits = PLAN_LIMITS[plan] || PLAN_LIMITS.free;
+  return {
+    day,
+    asks: row?.asks ?? 0,
+    runs: row?.runs ?? 0,
+    limits,
+  };
+}
+
+// --- D1: OAuth state ---
+
+async function dbStoreOAuthState(env, state, provider, codeVerifier, redirectTo) {
+  await env.DB
+    .prepare(
+      `INSERT INTO oauth_states (state, provider, code_verifier, redirect_to, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      state,
+      provider,
+      codeVerifier || null,
+      redirectTo || null,
+      nowSec() + OAUTH_STATE_TTL_SECONDS,
+    )
+    .run();
+}
+
+async function dbConsumeOAuthState(env, state) {
+  const row = await env.DB
+    .prepare(
+      `SELECT provider, code_verifier, redirect_to, expires_at FROM oauth_states WHERE state = ?`,
+    )
+    .bind(state)
+    .first();
+  if (!row) return null;
+  await env.DB.prepare(`DELETE FROM oauth_states WHERE state = ?`).bind(state).run();
+  if (row.expires_at < nowSec()) return null;
+  return row;
+}
+
+// --- D1: magic link ---
+
+async function dbStoreMagicToken(env, email, token, redirectTo) {
+  const ts = nowSec();
+  await env.DB
+    .prepare(
+      `INSERT INTO email_login_tokens (token, email, redirect_to, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+    .bind(token, email, redirectTo || null, ts, ts + 15 * 60)
+    .run();
+}
+
+async function dbConsumeMagicToken(env, token) {
+  const row = await env.DB
+    .prepare(
+      `SELECT email, redirect_to, expires_at, consumed_at
+         FROM email_login_tokens WHERE token = ?`,
+    )
+    .bind(token)
+    .first();
+  if (!row || row.consumed_at || row.expires_at < nowSec()) return null;
+  await env.DB
+    .prepare(`UPDATE email_login_tokens SET consumed_at = ? WHERE token = ?`)
+    .bind(nowSec(), token)
+    .run();
+  return row;
+}
+
+// --- cookies + currentUser ---
+
+function parseCookies(request) {
+  const header = request.headers.get("cookie") || "";
+  const out = {};
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (k) out[k] = decodeURIComponent(v);
+  }
+  return out;
+}
+
+function sessionCookieHeader(token, expiresAt) {
+  const maxAge = Math.max(0, expiresAt - nowSec());
+  return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
+}
+
+function clearSessionCookieHeader() {
+  return `${SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`;
+}
+
+async function currentUser(request, env) {
+  if (!hasDb(env)) return null;
+  await ensureSchema(env);
+  const cookies = parseCookies(request);
+  const token = cookies[SESSION_COOKIE];
+  if (!token) return null;
+  return dbGetSessionUser(env, token);
+}
+
+// --- OAuth: Google ---
+
+const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo";
+
+async function handleGoogleLogin(request, env) {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    return json({ error: "google_not_configured" }, { status: 503 });
+  }
+  if (!hasDb(env)) return json({ error: "db_not_configured" }, { status: 503 });
+  await ensureSchema(env);
+  const url = new URL(request.url);
+  const redirect = sanitizeReturnPath(url.searchParams.get("redirect"));
+  const state = newToken();
+  const { verifier, challenge } = await pkcePair();
+  await dbStoreOAuthState(env, state, "google", verifier, redirect);
+  const authUrl = new URL(GOOGLE_AUTH_URL);
+  authUrl.searchParams.set("client_id", env.GOOGLE_CLIENT_ID);
+  authUrl.searchParams.set("redirect_uri", buildOAuthRedirectUri("google"));
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", "openid email profile");
+  authUrl.searchParams.set("state", state);
+  authUrl.searchParams.set("code_challenge", challenge);
+  authUrl.searchParams.set("code_challenge_method", "S256");
+  authUrl.searchParams.set("access_type", "offline");
+  authUrl.searchParams.set("prompt", "select_account");
+  return Response.redirect(authUrl.toString(), 302);
+}
+
+async function handleGoogleCallback(request, env) {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    return loginError("google_not_configured");
+  }
+  if (!hasDb(env)) return loginError("db_not_configured");
+  await ensureSchema(env);
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const errParam = url.searchParams.get("error");
+  if (errParam) return loginError(`google_${errParam.slice(0, 40)}`);
+  if (!code || !state) return loginError("missing_params");
+  const stored = await dbConsumeOAuthState(env, state);
+  if (!stored || stored.provider !== "google") return loginError("invalid_state");
+  const body = new URLSearchParams({
+    code,
+    client_id: env.GOOGLE_CLIENT_ID,
+    client_secret: env.GOOGLE_CLIENT_SECRET,
+    redirect_uri: buildOAuthRedirectUri("google"),
+    grant_type: "authorization_code",
+    code_verifier: stored.code_verifier,
+  });
+  const tokRes = await fetch(GOOGLE_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!tokRes.ok) return loginError(`google_token_${tokRes.status}`);
+  const tok = await tokRes.json();
+  const profileRes = await fetch(GOOGLE_USERINFO_URL, {
+    headers: { authorization: `Bearer ${tok.access_token}` },
+  });
+  if (!profileRes.ok) return loginError("google_userinfo");
+  const profile = await profileRes.json();
+  if (!profile.sub) return loginError("google_no_sub");
+  const userId = await dbUpsertOAuthUser(env, {
+    provider: "google",
+    externalId: profile.sub,
+    externalLogin: profile.email,
+    email: profile.email,
+    name: profile.name,
+    avatarUrl: profile.picture,
+    accessToken: tok.access_token,
+    refreshToken: tok.refresh_token || null,
+  });
+  return loginSuccess(request, env, userId, stored.redirect_to);
+}
+
+// --- OAuth: GitHub ---
+
+const GITHUB_AUTH_URL = "https://github.com/login/oauth/authorize";
+const GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token";
+const GITHUB_USER_URL = "https://api.github.com/user";
+const GITHUB_USER_EMAILS_URL = "https://api.github.com/user/emails";
+
+async function handleGithubLogin(request, env) {
+  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
+    return json({ error: "github_not_configured" }, { status: 503 });
+  }
+  if (!hasDb(env)) return json({ error: "db_not_configured" }, { status: 503 });
+  await ensureSchema(env);
+  const url = new URL(request.url);
+  const redirect = sanitizeReturnPath(url.searchParams.get("redirect"));
+  const state = newToken();
+  await dbStoreOAuthState(env, state, "github", null, redirect);
+  const authUrl = new URL(GITHUB_AUTH_URL);
+  authUrl.searchParams.set("client_id", env.GITHUB_CLIENT_ID);
+  authUrl.searchParams.set("redirect_uri", buildOAuthRedirectUri("github"));
+  authUrl.searchParams.set("scope", "read:user user:email");
+  authUrl.searchParams.set("state", state);
+  return Response.redirect(authUrl.toString(), 302);
+}
+
+async function handleGithubCallback(request, env) {
+  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET) {
+    return loginError("github_not_configured");
+  }
+  if (!hasDb(env)) return loginError("db_not_configured");
+  await ensureSchema(env);
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const errParam = url.searchParams.get("error");
+  if (errParam) return loginError(`github_${errParam.slice(0, 40)}`);
+  if (!code || !state) return loginError("missing_params");
+  const stored = await dbConsumeOAuthState(env, state);
+  if (!stored || stored.provider !== "github") return loginError("invalid_state");
+  const body = new URLSearchParams({
+    client_id: env.GITHUB_CLIENT_ID,
+    client_secret: env.GITHUB_CLIENT_SECRET,
+    code,
+    redirect_uri: buildOAuthRedirectUri("github"),
+  });
+  const tokRes = await fetch(GITHUB_TOKEN_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/x-www-form-urlencoded",
+      accept: "application/json",
+    },
+    body,
+  });
+  if (!tokRes.ok) return loginError(`github_token_${tokRes.status}`);
+  const tok = await tokRes.json();
+  if (!tok.access_token) return loginError("github_no_token");
+  const auth = {
+    authorization: `Bearer ${tok.access_token}`,
+    "user-agent": "aeon-terminal",
+    accept: "application/vnd.github+json",
+  };
+  const [userRes, emailRes] = await Promise.all([
+    fetch(GITHUB_USER_URL, { headers: auth }),
+    fetch(GITHUB_USER_EMAILS_URL, { headers: auth }),
+  ]);
+  if (!userRes.ok) return loginError("github_userinfo");
+  const profile = await userRes.json();
+  let email = profile.email;
+  if (!email && emailRes.ok) {
+    const emails = await emailRes.json();
+    const primary = Array.isArray(emails)
+      ? emails.find((e) => e.primary && e.verified)
+      : null;
+    email = primary?.email || null;
+  }
+  const userId = await dbUpsertOAuthUser(env, {
+    provider: "github",
+    externalId: String(profile.id),
+    externalLogin: profile.login,
+    email,
+    name: profile.name || profile.login,
+    avatarUrl: profile.avatar_url,
+    accessToken: tok.access_token,
+    refreshToken: null,
+  });
+  return loginSuccess(request, env, userId, stored.redirect_to);
+}
+
+// --- Email magic link ---
+
+async function handleEmailRequest(request, env) {
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
+  if (!env.RESEND_API_KEY) return json({ error: "email_not_configured" }, { status: 503 });
+  if (!hasDb(env)) return json({ error: "db_not_configured" }, { status: 503 });
+  await ensureSchema(env);
+  let body;
   try {
-    await env.AEON_MEMORY.put(memKey(sid, kind), JSON.stringify(value), {
-      expirationTtl: MEM_TTL_SECONDS,
+    body = await request.json();
+  } catch {
+    return json({ error: "bad_json" }, { status: 400 });
+  }
+  const email = String(body?.email || "").trim().toLowerCase();
+  const redirect = sanitizeReturnPath(body?.redirect);
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+    return json({ error: "invalid_email" }, { status: 400 });
+  }
+  const token = newToken();
+  await dbStoreMagicToken(env, email, token, redirect);
+  const verifyUrl = new URL(`https://${CANONICAL_HOST}/api/auth/email/verify`);
+  verifyUrl.searchParams.set("token", token);
+  const sent = await sendMagicLink(env, email, verifyUrl.toString());
+  if (!sent.ok) {
+    return json(
+      { error: "email_send_failed", detail: (sent.detail || "").slice(0, 200) },
+      { status: 502 },
+    );
+  }
+  return json({ ok: true });
+}
+
+async function handleEmailVerify(request, env) {
+  if (!hasDb(env)) return loginError("db_not_configured");
+  await ensureSchema(env);
+  const url = new URL(request.url);
+  const token = url.searchParams.get("token") || "";
+  if (!token || !/^[a-f0-9]{32,128}$/.test(token)) return loginError("invalid_token");
+  const row = await dbConsumeMagicToken(env, token);
+  if (!row) return loginError("token_expired");
+  const userId = await dbUpsertEmailUser(env, row.email);
+  return loginSuccess(request, env, userId, row.redirect_to);
+}
+
+async function sendMagicLink(env, email, link) {
+  const from = env.EMAIL_FROM || "Aeon Terminal <login@aeonterminal.org>";
+  const subject = "Sign in to Aeon Terminal";
+  const text = `Click to finish signing in:\n\n${link}\n\nThe link expires in 15 minutes. If you didn't request this, ignore this email.`;
+  const html = `<!doctype html>
+<html><body style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:#0a0805;color:#f0e8da;padding:32px;margin:0;">
+<div style="max-width:480px;margin:0 auto;background:#15110a;border:1px solid rgba(255,107,26,.18);border-radius:12px;padding:24px;">
+<h1 style="font-size:18px;margin:0 0 16px;color:#FF6B1A;letter-spacing:.04em;">&gt;_ aeon&middot;terminal</h1>
+<p style="margin:0 0 16px;font-size:14px;line-height:1.6;">Click below to sign in.</p>
+<p style="margin:0 0 24px;"><a href="${link}" style="display:inline-block;padding:10px 18px;background:#FF6B1A;color:#0a0805;text-decoration:none;border-radius:6px;font-weight:600;">Sign in</a></p>
+<p style="margin:0;font-size:12px;color:#a89e8a;">Or copy this link:</p>
+<p style="margin:6px 0 16px;font-size:11px;color:#a89e8a;word-break:break-all;">${link}</p>
+<p style="margin:0;font-size:12px;color:#a89e8a;">Expires in 15 minutes. Ignore if you didn't request it.</p>
+</div></body></html>`;
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ from, to: [email], subject, text, html }),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    return { ok: false, detail: `${res.status}: ${detail}` };
+  }
+  return { ok: true };
+}
+
+// --- shared OAuth helpers ---
+
+function buildOAuthRedirectUri(provider) {
+  // Provider config registers exactly one redirect_uri so always use canonical.
+  return `https://${CANONICAL_HOST}/api/auth/${provider}/callback`;
+}
+
+function sanitizeReturnPath(p) {
+  if (!p || typeof p !== "string") return null;
+  if (!p.startsWith("/")) return null;
+  if (p.startsWith("//") || p.startsWith("/\\")) return null;
+  if (p.length > 200) return null;
+  return p;
+}
+
+async function loginSuccess(request, env, userId, redirectTo) {
+  const { token, expires } = await dbCreateSession(env, userId, request);
+  const target = `https://${CANONICAL_HOST}${redirectTo || AUTH_REDIRECT_AFTER_LOGIN}`;
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: target,
+      "set-cookie": sessionCookieHeader(token, expires),
+    },
+  });
+}
+
+function loginError(code) {
+  const target = `https://${CANONICAL_HOST}/login?error=${encodeURIComponent(code)}`;
+  return Response.redirect(target, 302);
+}
+
+// --- /api/me, /api/auth/logout ---
+
+async function handleMe(request, env) {
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  const user = await currentUser(request, env);
+  if (!user) return json({ user: null });
+  let usage = null;
+  try {
+    usage = await dbGetUsage(env, user.id, user.plan);
+  } catch {
+    // ignore
+  }
+  return json({
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+      avatar_url: user.avatar_url,
+      provider: user.primary_provider,
+      plan: user.plan,
+    },
+    usage,
+  });
+}
+
+async function handleLogout(request, env) {
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  const cookies = parseCookies(request);
+  const token = cookies[SESSION_COOKIE];
+  if (token && hasDb(env)) {
+    try {
+      await dbDeleteSession(env, token);
+    } catch {
+      // ignore
+    }
+  }
+  if (request.method === "POST") {
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: {
+        ...CORS,
+        "content-type": "application/json",
+        "set-cookie": clearSessionCookieHeader(),
+      },
     });
-  } catch {
-    // swallow — memory is best-effort
   }
-}
-
-async function memClear(env, sid) {
-  if (!hasKv(env) || !sid) return;
-  try {
-    await Promise.all([
-      env.AEON_MEMORY.delete(memKey(sid, "turns")),
-      env.AEON_MEMORY.delete(memKey(sid, "runs")),
-    ]);
-  } catch {
-    // swallow
-  }
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: `https://${CANONICAL_HOST}/`,
+      "set-cookie": clearSessionCookieHeader(),
+    },
+  });
 }
 
 function trunc(s, n) {
@@ -894,35 +1659,32 @@ async function handleMemory(request, env) {
       status: 204,
       headers: {
         ...CORS,
-        "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-        "access-control-allow-headers": "content-type, x-session-id",
+        "access-control-allow-methods": "GET, DELETE, OPTIONS",
       },
     });
   }
 
-  const sid = sanitizeSid(request.headers.get("x-session-id"));
-  if (!sid) return json({ error: "bad_session_id" }, { status: 400 });
+  if (!hasDb(env)) {
+    if (request.method === "GET") {
+      return json({ enabled: false, reason: "db_not_configured", turns: [], runs: [] });
+    }
+    return json({ error: "db_not_configured" }, { status: 503 });
+  }
 
-  if (!hasKv(env)) {
-    // Either the binding is missing or it was wired up as the wrong type
-    // (e.g. plain text variable). Surface a useful hint instead of pretending
-    // memory works.
-    const reason = !env.AEON_MEMORY
-      ? "binding_missing"
-      : "binding_not_kv";
-    if (request.method === "GET")
-      return json({ enabled: false, reason, turns: [], runs: [] });
-    if (request.method === "DELETE")
-      return json({ enabled: false, reason, ok: true });
-    return json({ error: "method_not_allowed" }, { status: 405 });
+  const user = await currentUser(request, env);
+  if (!user) {
+    if (request.method === "GET") {
+      return json({ enabled: false, reason: "not_signed_in", turns: [], runs: [] });
+    }
+    return json({ error: "unauthorized" }, { status: 401 });
   }
 
   if (request.method === "GET") {
-    const mem = await memRead(env, sid);
+    const mem = await dbGetMemory(env, user.id);
     return json({ enabled: true, turns: mem.turns, runs: mem.runs });
   }
   if (request.method === "DELETE") {
-    await memClear(env, sid);
+    await dbClearMemory(env, user.id);
     return json({ enabled: true, ok: true });
   }
   return json({ error: "method_not_allowed" }, { status: 405 });
@@ -931,10 +1693,20 @@ async function handleMemory(request, env) {
 const worker = {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const path = url.pathname;
 
-    // /api endpoints are served on every hostname (subdomain pages call them too)
-    if (url.pathname === "/api/exec") return handleExec(request, env);
-    if (url.pathname === "/api/memory") return handleMemory(request, env);
+    // Auth + API endpoints served on canonical apex only (we redirect
+    // brand subdomains to apex below, before routing).
+    if (path === "/api/exec") return handleExec(request, env);
+    if (path === "/api/memory") return handleMemory(request, env);
+    if (path === "/api/me") return handleMe(request, env);
+    if (path === "/api/auth/logout") return handleLogout(request, env);
+    if (path === "/api/auth/google/login") return handleGoogleLogin(request, env);
+    if (path === "/api/auth/google/callback") return handleGoogleCallback(request, env);
+    if (path === "/api/auth/github/login") return handleGithubLogin(request, env);
+    if (path === "/api/auth/github/callback") return handleGithubCallback(request, env);
+    if (path === "/api/auth/email/request") return handleEmailRequest(request, env);
+    if (path === "/api/auth/email/verify") return handleEmailVerify(request, env);
 
     // Brand subdomains: redirect to canonical apex so we have one source of truth.
     const hostRule = HOST_REDIRECTS[url.hostname];
