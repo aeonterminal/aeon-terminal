@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { TOKEN, shortAddress } from "@/lib/token";
+
 type Me = {
   user: {
     id: string;
@@ -16,7 +18,12 @@ type Me = {
     tier: "free" | "paid";
     plan: "free" | "paid";
     source: "plan" | "holder";
-    wallet: { address: string; tier: "free" | "paid" } | null;
+    wallet: {
+      address: string;
+      tier: "free" | "paid";
+      balance_wei?: string;
+    } | null;
+    threshold_wei?: string;
   } | null;
   usage?: {
     day: string;
@@ -25,6 +32,31 @@ type Me = {
     limits: { asks: number; runs: number };
   } | null;
 };
+
+// Format a wei string (18 decimals) as a short integer balance with k/M
+// suffix. Used in the menu where we want a glanceable size, not precision.
+// Avoids BigInt literals so the file can be transpiled to older targets.
+function formatTokenShort(wei: string | undefined): string {
+  if (!wei || !/^-?\d+$/.test(wei)) return "0";
+  // Drop the last 18 digits (= integer wei → integer token units).
+  let whole = wei.length > 18 ? wei.slice(0, wei.length - 18) : "0";
+  whole = whole.replace(/^0+(?=\d)/, "") || "0";
+  // ~16 digits is the safe range for Number conversion.
+  const num = whole.length > 15 ? Number.POSITIVE_INFINITY : Number(whole);
+  if (!Number.isFinite(num)) return `${whole.slice(0, -9)}B+`;
+  if (num >= 1_000_000) {
+    return `${(num / 1_000_000).toFixed(num >= 10_000_000 ? 0 : 1)}M`;
+  }
+  if (num >= 1_000) {
+    return `${(num / 1_000).toFixed(num >= 10_000 ? 0 : 1)}k`;
+  }
+  return num.toString();
+}
+
+function pct(used: number, limit: number): number {
+  if (!limit) return 0;
+  return Math.max(0, Math.min(100, Math.round((used / limit) * 100)));
+}
 
 export function UserBadge() {
   const [me, setMe] = useState<Me | null>(null);
@@ -110,15 +142,25 @@ export function UserBadge() {
   const runs = me.usage?.runs ?? 0;
   const askLimit = me.usage?.limits.asks ?? 30;
   const runLimit = me.usage?.limits.runs ?? 10;
+  const askPct = pct(asks, askLimit);
+  const runPct = pct(runs, runLimit);
   const tierLabel =
     me.tier?.source === "holder" ? "holder" : me.tier?.tier ?? user.plan;
-  const tierClass =
-    tierLabel === "holder"
-      ? "text-accent-2"
-      : tierLabel === "paid"
-        ? "text-accent"
-        : "text-accent";
-  const walletLinked = !!me.tier?.wallet;
+  const isHolder = tierLabel === "holder";
+  const isPaid = tierLabel === "paid";
+  const tierClass = isHolder
+    ? "text-accent-2"
+    : isPaid
+      ? "text-accent"
+      : "text-muted";
+  const tierBorderClass = isHolder
+    ? "border-accent-2/40 bg-accent-2/5"
+    : isPaid
+      ? "border-accent/40 bg-accent/5"
+      : "border-border bg-surface-2/40";
+  const wallet = me.tier?.wallet ?? null;
+  const walletLinked = !!wallet;
+  const balanceShort = wallet ? formatTokenShort(wallet.balance_wei) : null;
 
   return (
     <div ref={ref} className="relative">
@@ -150,74 +192,213 @@ export function UserBadge() {
       {open && (
         <div
           role="menu"
-          className="absolute right-0 mt-2 w-64 rounded border border-border bg-surface p-3 text-xs shadow-lg"
+          className="absolute right-0 mt-2 w-[18rem] max-w-[calc(100vw-1rem)] overflow-hidden rounded border border-border bg-surface text-xs shadow-[0_8px_32px_rgba(0,0,0,0.45)]"
         >
-          <div className="mb-2 flex items-center gap-2 border-b border-border pb-2">
+          <div className="flex items-start gap-3 border-b border-border bg-surface-2/40 p-3">
             {user.avatar_url ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={user.avatar_url}
                 alt=""
-                className="h-7 w-7 rounded-full border border-border object-cover"
+                className={`h-10 w-10 rounded-full border object-cover ${
+                  isHolder
+                    ? "border-accent-2"
+                    : isPaid
+                      ? "border-accent"
+                      : "border-border"
+                }`}
               />
             ) : (
-              <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-border bg-surface-2 text-xs uppercase text-muted">
+              <span
+                className={`inline-flex h-10 w-10 items-center justify-center rounded-full border bg-surface text-base uppercase text-foreground ${
+                  isHolder
+                    ? "border-accent-2"
+                    : isPaid
+                      ? "border-accent"
+                      : "border-border"
+                }`}
+              >
                 {initial}
               </span>
             )}
             <div className="min-w-0 flex-1">
-              <div className="truncate text-foreground">{label}</div>
+              <div className="truncate text-sm text-foreground">{label}</div>
               {user.email && user.email !== label ? (
-                <div className="truncate text-muted">{user.email}</div>
+                <div className="truncate text-[11px] text-muted">
+                  {user.email}
+                </div>
               ) : null}
-              <div className="text-muted">
-                via <span className="text-foreground">{user.provider}</span> ·{" "}
-                <span className={tierClass}>{tierLabel}</span>
-                {walletLinked ? (
-                  <span className="text-muted-2"> · wallet</span>
-                ) : null}
+              <div className="mt-0.5 text-[10px] uppercase tracking-widest text-muted-2">
+                via{" "}
+                <span className="normal-case tracking-normal text-muted">
+                  {user.provider || "—"}
+                </span>
               </div>
             </div>
           </div>
-          <div className="mb-2 space-y-1 text-muted">
-            <div className="flex justify-between">
-              <span>asks today</span>
-              <span className="text-foreground">
-                {asks} / {askLimit}
+
+          <div className={`m-3 rounded border p-2.5 ${tierBorderClass}`}>
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-[10px] uppercase tracking-widest text-muted-2">
+                $ tier
+              </span>
+              <span className={`font-mono text-sm ${tierClass}`}>
+                {tierLabel}
               </span>
             </div>
-            <div className="flex justify-between">
-              <span>runs today</span>
-              <span className="text-foreground">
-                {runs} / {runLimit}
-              </span>
+            <div className="mt-1 text-[10px] leading-snug text-muted">
+              {isHolder ? (
+                <>
+                  unlocked by holding{" "}
+                  <span className="text-foreground">100k ${TOKEN.symbol}</span>{" "}
+                  on Base.
+                </>
+              ) : isPaid ? (
+                <>active paid plan.</>
+              ) : (
+                <>
+                  hold{" "}
+                  <span className="text-foreground">100k ${TOKEN.symbol}</span>{" "}
+                  on Base to unlock <span className="text-accent">paid</span>{" "}
+                  quota.
+                </>
+              )}
+            </div>
+            {!isHolder && !isPaid ? (
+              <Link
+                href="/account"
+                onClick={() => setOpen(false)}
+                className="mt-2 inline-flex items-center rounded border border-accent/50 bg-accent/10 px-2 py-1 text-[10px] uppercase tracking-widest text-accent transition-colors hover:bg-accent/20"
+              >
+                → upgrade
+              </Link>
+            ) : null}
+          </div>
+
+          <div className="mx-3 mb-2">
+            <div className="text-[10px] uppercase tracking-widest text-muted-2">
+              $ usage --today
+            </div>
+            <div className="mt-1.5 space-y-2">
+              <UsageRow label="asks" used={asks} limit={askLimit} pct={askPct} />
+              <UsageRow label="runs" used={runs} limit={runLimit} pct={runPct} />
             </div>
           </div>
-          <div className="flex flex-col gap-1 border-t border-border pt-2">
-            <Link
+
+          {walletLinked && wallet ? (
+            <div className="mx-3 mb-2 border-t border-border pt-2">
+              <div className="text-[10px] uppercase tracking-widest text-muted-2">
+                $ wallet
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-2">
+                <code className="truncate font-mono text-[11px] text-foreground">
+                  {shortAddress(wallet.address, 6)}
+                </code>
+                <span className="text-[11px] text-muted">
+                  {balanceShort} {TOKEN.symbol}
+                </span>
+              </div>
+            </div>
+          ) : null}
+
+          <div className="flex flex-col border-t border-border bg-surface-2/30 p-2">
+            <MenuLink
               href="/terminal"
               onClick={() => setOpen(false)}
-              className="rounded px-2 py-1 text-muted hover:bg-surface-2 hover:text-foreground"
-            >
-              open terminal →
-            </Link>
-            <Link
+              label="open terminal"
+              hint="ask & run"
+            />
+            <MenuLink
+              href="/skills/mine"
+              onClick={() => setOpen(false)}
+              label="my custom skills"
+              hint="create & share"
+            />
+            <MenuLink
               href="/account"
               onClick={() => setOpen(false)}
-              className="rounded px-2 py-1 text-muted hover:bg-surface-2 hover:text-foreground"
-            >
-              {walletLinked ? "wallet linked →" : "connect wallet →"}
-            </Link>
+              label={walletLinked ? "wallet & tier" : "connect wallet"}
+              hint={walletLinked ? "manage link" : "unlock paid"}
+            />
+            <MenuLink
+              href="/token"
+              onClick={() => setOpen(false)}
+              label={`$${TOKEN.symbol}`}
+              hint="utility & roadmap"
+            />
             <button
               type="button"
               onClick={signOut}
-              className="rounded px-2 py-1 text-left text-muted hover:bg-surface-2 hover:text-foreground"
+              className="mt-1 flex items-center justify-between rounded px-2 py-1.5 text-left text-muted transition-colors hover:bg-surface-2 hover:text-red"
             >
-              sign out
+              <span>→ sign out</span>
+              <span className="text-[10px] uppercase tracking-widest text-muted-2">
+                end session
+              </span>
             </button>
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+function UsageRow({
+  label,
+  used,
+  limit,
+  pct: percent,
+}: {
+  label: string;
+  used: number;
+  limit: number;
+  pct: number;
+}) {
+  const fillClass =
+    percent >= 90
+      ? "bg-red"
+      : percent >= 70
+        ? "bg-amber"
+        : "bg-accent";
+  return (
+    <div>
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="text-muted">{label}</span>
+        <span className="font-mono text-foreground">
+          {used} <span className="text-muted">/ {limit}</span>
+        </span>
+      </div>
+      <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-surface-2">
+        <div
+          className={`h-full ${fillClass} transition-all`}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function MenuLink({
+  href,
+  onClick,
+  label,
+  hint,
+}: {
+  href: string;
+  onClick: () => void;
+  label: string;
+  hint: string;
+}) {
+  return (
+    <Link
+      href={href}
+      onClick={onClick}
+      className="flex items-center justify-between rounded px-2 py-1.5 text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+    >
+      <span>→ {label}</span>
+      <span className="text-[10px] uppercase tracking-widest text-muted-2">
+        {hint}
+      </span>
+    </Link>
   );
 }
