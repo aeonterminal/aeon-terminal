@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { TerminalWindow } from "@/components/terminal-window";
+import { SKILLS } from "@/lib/skills";
 
 export const metadata: Metadata = {
   title: "About",
@@ -133,8 +134,9 @@ export default function AboutPage() {
           </div>
         </div>
         <p className="mt-4 text-[11px] leading-relaxed text-muted-2">
-          22 skills in the catalog are scaffolded but waiting on one of the
-          coming-soon integrations. Each card prints its exact requirement.
+          {SKILLS.filter((s) => s.comingSoon).length} skills in the catalog are
+          scaffolded but waiting on one of the coming-soon integrations. Each
+          card prints its exact requirement.
         </p>
       </div>
 
