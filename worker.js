@@ -442,9 +442,8 @@ function buildToolFetchHeaders(url, env) {
         headers.authorization = `Bearer ${env.GITHUB_API_TOKEN}`;
       }
     } else if (
-      host.endsWith("githubusercontent.com") ||
-      host === "raw.githubusercontent.com" ||
-      host === "patch-diff.githubusercontent.com"
+      host === "githubusercontent.com" ||
+      host.endsWith(".githubusercontent.com")
     ) {
       if (env?.GITHUB_API_TOKEN) {
         headers.authorization = `Bearer ${env.GITHUB_API_TOKEN}`;

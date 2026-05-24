@@ -34,7 +34,7 @@ export function SkillCard({ skill, className = "" }: Props) {
               {skill.cron}
             </span>
           ) : null}
-          {skill.selfHealing ? (
+          {!dim && skill.selfHealing ? (
             <span className="rounded border border-accent-dim px-1.5 py-0.5 text-accent">
               self-heal
             </span>
