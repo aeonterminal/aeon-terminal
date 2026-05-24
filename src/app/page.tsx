@@ -1,7 +1,9 @@
 import Link from "next/link";
 import { HeroTerminal } from "@/components/hero-terminal";
+import { LiveSkillPanel } from "@/components/live-skill-panel";
 import { TerminalWindow } from "@/components/terminal-window";
 import { SkillCard } from "@/components/skill-card";
+import { TokenPricePill } from "@/components/token-price-pill";
 import {
   CATEGORIES,
   SKILLS,
@@ -37,10 +39,13 @@ export default function HomePage() {
         <div aria-hidden className="absolute inset-0 dots opacity-50" />
         <div className="relative mx-auto grid max-w-6xl gap-8 px-4 py-10 sm:gap-10 sm:px-6 sm:py-16 lg:grid-cols-2 lg:gap-14 lg:py-24">
           <div className="flex flex-col justify-center gap-6">
-            <p className="inline-flex w-fit items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-[11px] uppercase tracking-widest text-muted">
-              <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--accent)]" />
-              autonomous agent terminal · v0.1.0
-            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <p className="inline-flex w-fit items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-[11px] uppercase tracking-widest text-muted">
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--accent)]" />
+                autonomous agent terminal · v0.1.0
+              </p>
+              <TokenPricePill />
+            </div>
             <h1 className="text-balance text-[1.75rem] leading-[1.1] tracking-tight text-foreground sm:text-4xl md:text-5xl">
               <span className="text-muted">$</span>{" "}
               <span className="text-foreground">aeon</span>
@@ -212,6 +217,38 @@ export default function HomePage() {
               </Link>
             ))}
           </div>
+        </div>
+      </section>
+
+      {/* LIVE SKILL OUTPUT */}
+      <section className="border-b border-border">
+        <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6 sm:py-16">
+          <div className="mb-6 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-[11px] uppercase tracking-widest text-muted">
+                $ aeon live --skill github-monitor
+              </p>
+              <h2 className="mt-1 text-2xl tracking-tight text-foreground sm:text-3xl">
+                One skill,{" "}
+                <span className="text-accent-2 glow-accent-2">running live.</span>
+              </h2>
+              <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted">
+                Below is the actual output of{" "}
+                <code className="rounded bg-surface px-1.5 py-0.5 text-foreground">
+                  github-monitor
+                </code>{" "}
+                pointed at this repo. Pulled from the public GitHub API in
+                your browser. Refreshes every 5 minutes. No login required.
+              </p>
+            </div>
+            <Link
+              href="/skills"
+              className="text-sm text-muted transition-colors hover:text-accent"
+            >
+              browse the catalog →
+            </Link>
+          </div>
+          <LiveSkillPanel />
         </div>
       </section>
 

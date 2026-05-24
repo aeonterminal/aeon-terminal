@@ -3,6 +3,7 @@ import Link from "next/link";
 
 import { CopyAddressButton } from "@/components/copy-address-button";
 import { TerminalWindow } from "@/components/terminal-window";
+import { TokenPriceCard } from "@/components/token-price-card";
 import { ROADMAP, statusLabel, type MilestoneStatus } from "@/lib/roadmap";
 import { TOKEN, UTILITIES, type UtilityStatus } from "@/lib/token";
 
@@ -92,6 +93,10 @@ export default function TokenPage() {
               </div>
             </div>
           </TerminalWindow>
+
+          <div className="mt-6">
+            <TokenPriceCard />
+          </div>
 
           <div className="mt-6 flex flex-wrap gap-3">
             <a
