@@ -46,6 +46,15 @@ export const UTILITIES: readonly TokenUtility[] = [
     status: "live",
   },
   {
+    slug: "live-status",
+    title: "Live status & usage page",
+    summary:
+      "Public health probes, today's asks/runs counters, per-skill activity — refreshed every 30s.",
+    detail:
+      "/status hits the worker, D1, Base RPC, Dexscreener, and GitHub on every load and reports real latency + error states. Counters and skill activity come from the same tables the rest of the app writes to. No fudged numbers, no demo mode.",
+    status: "live",
+  },
+  {
     slug: "holder-skills",
     title: "Holder-only skills",
     summary:
