@@ -25,3 +25,11 @@ database_id = "60b9c5d6-151e-4971-a78c-22a24617ff58"
 #   RESEND_API_KEY        — Resend API key for email magic links
 #   GITHUB_API_TOKEN      — GitHub fine-grained PAT (public repos, read-only) for skill API calls
 #   EMAIL_FROM            — (optional) From address, defaults to "Aeon Terminal <login@aeonterminal.org>"
+#
+# Optional Stripe billing (paid plan checkout + portal). When unset, the
+# /api/billing/* routes return 503 stripe_not_configured and the /account
+# subscription card shows a "wiring pending" panel — no crashes, no fake
+# checkout. Provision via Cloudflare dashboard or `wrangler secret put`.
+#   STRIPE_SECRET_KEY     — sk_live_... or sk_test_...
+#   STRIPE_WEBHOOK_SECRET — whsec_... from the Stripe webhook endpoint config
+#   STRIPE_PRICE_ID       — price_... for the paid monthly subscription
