@@ -28,23 +28,22 @@ export interface TokenUtility {
 
 export const UTILITIES: readonly TokenUtility[] = [
   {
+    slug: "quota-unlock",
+    title: "Hold to unlock paid quota",
+    summary:
+      "200 asks + 50 skill runs / day · 25 custom skills · free for $aeonterminal holders.",
+    detail:
+      "Link any EVM wallet on /account. We read your $aeonterminal balance on Base via a public RPC. Hold ≥ 100,000 tokens and the paid quota turns on instantly — no Stripe, no card, no waitlist. Sell, and on the next refresh (≤ 1h) the account rolls back to free.",
+    status: "live",
+  },
+  {
     slug: "custom-skills",
     title: "Build your own skill",
     summary:
       "Name a Claude persona, run it from the terminal, share it as a link.",
     detail:
-      "Custom skills are live for every signed-in user (3 per account on the free tier). Once wallet-connect ships, $aeonterminal holders get a higher cap (25+) and access to skill templates that require higher-cost models.",
+      "Custom skills are live for every signed-in user. Free accounts get 3 saved skills; $aeonterminal holders get 25. Higher-cost model templates ship next on the holder tier.",
     status: "live",
-    blockedBy: "Wallet-connect for holder cap unlock — Q2",
-  },
-  {
-    slug: "quota-unlock",
-    title: "Hold to unlock paid quota",
-    summary: "200 asks + 50 skill runs / day, free for $aeonterminal holders.",
-    detail:
-      "Connect your wallet on the billing page. If you hold the threshold balance on Base, paid-tier limits are unlocked without a Stripe subscription. Sell, and the account rolls back to the free tier on the next UTC day.",
-    status: "next",
-    blockedBy: "Stripe billing + on-chain balance check",
   },
   {
     slug: "holder-skills",
