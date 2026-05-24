@@ -10,9 +10,10 @@ type Props = {
 export function SkillCard({ skill, className = "" }: Props) {
   const cat = CATEGORIES[skill.category];
   const dim = skill.comingSoon;
+  const holderOnly = !!skill.holderOnly;
   return (
     <article
-      className={`group relative flex flex-col gap-3 rounded-md border border-border bg-surface p-4 transition-colors hover:border-border-strong ${dim ? "opacity-50" : ""} ${className}`}
+      className={`group relative flex flex-col gap-3 rounded-md border bg-surface p-4 transition-colors hover:border-border-strong ${holderOnly ? "border-accent-2/40" : "border-border"} ${dim ? "opacity-50" : ""} ${className}`}
     >
       <div className="flex items-start justify-between gap-3">
         <div className="space-y-1">
@@ -24,6 +25,11 @@ export function SkillCard({ skill, className = "" }: Props) {
           </h3>
         </div>
         <div className="flex flex-col items-end gap-1 text-[10px] uppercase tracking-widest text-muted-2">
+          {holderOnly ? (
+            <span className="rounded border border-accent-2/50 bg-accent-2/10 px-1.5 py-0.5 text-accent-2">
+              holder
+            </span>
+          ) : null}
           {dim ? (
             <span className="rounded border border-muted-2 px-1.5 py-0.5 text-muted-2">
               coming soon
@@ -42,6 +48,14 @@ export function SkillCard({ skill, className = "" }: Props) {
         </div>
       </div>
       <p className="text-xs leading-relaxed text-muted">{skill.summary}</p>
+      {holderOnly ? (
+        <p className="text-[10px] leading-relaxed text-accent-2/80">
+          Holder-only — hold 100k $aeonterminal to unlock when this ships.{" "}
+          <a href="/account" className="underline hover:text-accent-2">
+            link wallet
+          </a>
+        </p>
+      ) : null}
       {dim && skill.requires ? (
         <p className="mt-auto text-[10px] text-muted-2">
           Needs: {skill.requires}

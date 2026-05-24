@@ -78,6 +78,7 @@ const SKILL_REGISTRY = {
     name: "auto-merge",
     summary: "Watches the merge queue. Lands ready PRs that pass policy and CI.",
     comingSoon: true,
+    holderOnly: true,
     requires: "GitHub OAuth scope `repo` (write access) — not yet wired.",
   },
   "code-health": {
@@ -133,6 +134,7 @@ const SKILL_REGISTRY = {
     name: "unlock-monitor",
     summary: "Flags token unlocks before they hit, with float context.",
     comingSoon: true,
+    holderOnly: true,
     requires: "TokenUnlocks/Cryptorank API (paid tier) — not yet wired.",
   },
   "treasury-info": {
@@ -173,6 +175,7 @@ const SKILL_REGISTRY = {
     name: "syndicate-article",
     summary: "Push a new post across Twitter, Farcaster, LinkedIn, blog.",
     comingSoon: true,
+    holderOnly: true,
     requires: "Per-platform OAuth (X, Farcaster, LinkedIn) — not yet wired.",
   },
 
@@ -733,6 +736,43 @@ async function handleExec(request, env) {
       effectiveSkillKey = `u:${customSkill.id}`;
     } else {
       return json({ error: "unknown_skill" }, { status: 400 });
+    }
+  }
+
+  // Holder-only gate for catalog skills. Sits ahead of the coming-soon
+  // shortcut so non-holders see a clear "hold to unlock" message rather
+  // than a generic "pipeline scaffolded" reason. Holders (tier source ===
+  // "holder") flow through to the normal handling below.
+  if (mode === "run" && !customSkill && SKILL_REGISTRY[skill]?.holderOnly) {
+    if (!user) {
+      return json(
+        {
+          error: "sign_in_required",
+          message: "Sign in, then link a wallet holding $aeonterminal to unlock this skill.",
+        },
+        { status: 401 },
+      );
+    }
+    let tier;
+    try {
+      tier = await resolveUserTier(env, user);
+    } catch {
+      tier = { tier: "free", source: "plan" };
+    }
+    if (tier.source !== "holder") {
+      const thresholdWei = tokenHolderThresholdWei(env).toString();
+      return json(
+        {
+          error: "holder_only",
+          message:
+            "This skill is gated to $aeonterminal holders. Link a wallet holding the threshold on /account to unlock.",
+          skill,
+          threshold_wei: thresholdWei,
+          tier: tier.tier,
+          source: tier.source,
+        },
+        { status: 403 },
+      );
     }
   }
 

@@ -55,6 +55,11 @@ export const ROADMAP: readonly RoadmapPhase[] = [
         detail:
           "real probes (worker · d1 · base rpc · dexscreener · github) + usage counters + per-skill activity · 30s poll",
       },
+      {
+        label: "holder-only skill gate",
+        detail:
+          "server-side gate on /api/exec + catalog badges · first 3 skills tagged (auto-merge, unlock-monitor, syndicate-article) · holders bypass automatically when shipped",
+      },
     ],
   },
   {
@@ -92,12 +97,12 @@ export const ROADMAP: readonly RoadmapPhase[] = [
         detail: "use the terminal from chat · same memory · same quota",
       },
       {
-        label: "github write-access skills",
-        detail: "auto-merge · pr-write · gated to $aeonterminal holders",
+        label: "github write-access skills (real integration)",
+        detail: "auto-merge · pr-write · already holder-gated in catalog · needs github oauth `repo` scope",
       },
       {
-        label: "holder skill catalog",
-        detail: "advanced research + 32k context jobs · token-gated route guard",
+        label: "more holder-only catalog slots",
+        detail: "advanced research + 32k context jobs · gate is live, integrations pending",
       },
       {
         label: "prioritisation vote",
