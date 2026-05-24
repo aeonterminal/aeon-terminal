@@ -34,34 +34,38 @@ export const CATEGORIES: Record<
 > = {
   research: {
     label: "Research & Content",
-    description: "Digest the world. Daily briefs, deep research, paper picks.",
+    description:
+      "Digest the world: arxiv papers, RSS feeds, HN, and ad-hoc deep dives.",
     accent: "text-cyan",
   },
   dev: {
     label: "Dev & Code",
     description:
-      "Watch repos, triage PRs, ship deploys, auto-merge clean changes.",
+      "Pull live data from GitHub: repo stats, PR diffs, dep health, vuln advisories.",
     accent: "text-accent",
   },
   crypto: {
     label: "Crypto & Markets",
-    description: "On-chain monitors, token alerts, market context, treasury.",
+    description:
+      "CoinGecko price movers, DefiLlama TVL deltas, treasury composition.",
     accent: "text-amber",
   },
   social: {
     label: "Social & Writing",
     description:
-      "Threads, replies, campaigns, syndication. Voice-matched output.",
+      "Threads, replies, campaigns, syndication. Mostly waiting on the X/Farcaster APIs.",
     accent: "text-pink",
   },
   productivity: {
     label: "Productivity",
-    description: "Routines, recaps, goal tracking, idea capture, reflection.",
+    description:
+      "Routines, recaps, goals, idea capture. Needs a personal data store, not shipped yet.",
     accent: "text-foreground",
   },
   meta: {
     label: "Meta / Agent",
-    description: "Self-improvement. Skills that audit, repair, and evolve.",
+    description:
+      "Self-improvement: audit, repair, evolve. Needs the agent fleet, also not shipped yet.",
     accent: "text-muted",
   },
 };
@@ -73,10 +77,9 @@ export const SKILLS: Skill[] = [
     name: "morning-brief",
     category: "research",
     summary:
-      "A focused, voice-matched briefing of the world before you open your laptop.",
+      "A focused briefing pulled from Hacker News + BBC RSS. Three minutes, grounded sources.",
     cron: "0 7 * * *",
-    outputs: ["telegram", "discord", "json-render"],
-    selfHealing: true,
+    outputs: ["digest"],
   },
   {
     slug: "deep-research",

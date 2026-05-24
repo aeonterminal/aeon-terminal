@@ -59,7 +59,10 @@ export default function SkillsPage() {
       <div className="space-y-14">
         {ORDER.map((key) => {
           const cat = CATEGORIES[key];
-          const skills = SKILLS.filter((s) => s.category === key);
+          const skills = SKILLS.filter((s) => s.category === key).sort(
+            (a, b) => Number(!!a.comingSoon) - Number(!!b.comingSoon),
+          );
+          const live = skills.filter((s) => !s.comingSoon).length;
           return (
             <section
               key={key}
@@ -72,7 +75,10 @@ export default function SkillsPage() {
                     {cat.label}
                   </p>
                   <h2 className="mt-1 text-xl text-foreground sm:text-2xl">
-                    {skills.length} skill{skills.length === 1 ? "" : "s"}
+                    {live} live{" "}
+                    <span className="text-muted-2">
+                      / {skills.length} total
+                    </span>
                   </h2>
                   <p className="mt-1 max-w-2xl text-sm text-muted">
                     {cat.description}
