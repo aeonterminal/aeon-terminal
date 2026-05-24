@@ -170,18 +170,21 @@ export function AccountClient() {
         body: JSON.stringify({ address, signature, nonce, issued_at }),
       });
       const verifyJson = (await verifyRes.json()) as
-        | { ok: true; tier: TierInfo }
+        | { ok: true; tier: TierInfo; transferred?: boolean }
         | { error: string; message?: string };
       if (!verifyRes.ok || !("ok" in verifyJson)) {
         const errMsg = "error" in verifyJson ? verifyJson.error : "verify_failed";
         throw new Error(errMsg);
       }
+      const transferNote = verifyJson.transferred
+        ? " (transferred from another aeon.terminal account)"
+        : "";
       setFlash({
         kind: "ok",
         message:
           verifyJson.tier.wallet?.tier === "paid"
-            ? "wallet linked · holder tier unlocked."
-            : "wallet linked · balance below holder threshold (still free tier).",
+            ? `wallet linked · holder tier unlocked.${transferNote}`
+            : `wallet linked · balance below holder threshold (still free tier).${transferNote}`,
       });
       setState({ kind: "ok", tier: verifyJson.tier });
     } catch (err) {
@@ -538,9 +541,12 @@ export function AccountClient() {
             you back to free.
           </li>
           <li>
-            <span className="text-foreground">One wallet per account.</span>{" "}
-            Connecting a different address replaces the previous link. Unlink
-            anytime to detach.
+            <span className="text-foreground">One wallet, one account.</span>{" "}
+            Each aeon.terminal account links at most one wallet, and each
+            wallet links to at most one account at a time. Linking a wallet
+            that&apos;s already on another account transfers the link to this
+            one — holder quota can&apos;t be multiplied across accounts.
+            Unlink anytime to detach.
           </li>
         </ul>
       </section>
