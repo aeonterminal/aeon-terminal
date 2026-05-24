@@ -43,6 +43,12 @@ export const metadata: Metadata = {
     title: "Aeon Terminal",
     description: "Autonomous agents, from the terminal.",
   },
+  verification: {
+    other: {
+      "virtual-protocol-site-verification":
+        "bf0191f8367e6901a7da97938171b86e",
+    },
+  },
 };
 
 export default function RootLayout({
