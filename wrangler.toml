@@ -9,8 +9,18 @@ directory = "./out"
 not_found_handling = "404-page"
 run_worker_first = true
 
-# Optional binding (configured via Cloudflare dashboard, not declared here so
-# Git-based deploys don't fail on a missing namespace id):
-#   AEON_MEMORY — KV namespace for per-session memory.
-# The Worker reads/writes this binding only if it is present; it degrades to
-# stateless mode otherwise. See README for setup steps.
+# Per-user state lives in Cloudflare D1 (SQLite). The worker calls
+# ensureSchema() on first use, so no manual migrations are required.
+[[d1_databases]]
+binding = "DB"
+database_name = "aeon_terminal"
+database_id = "3dc3f1e5-eef7-46e2-a374-11a1cdc98be4"
+
+# Secrets configured via Cloudflare dashboard (Settings → Variables and Secrets):
+#   ANTHROPIC_API_KEY — Claude API key
+#   X_CLIENT_ID       — X (Twitter) OAuth 2.0 client id
+#   X_CLIENT_SECRET   — X (Twitter) OAuth 2.0 client secret
+#   SESSION_SECRET    — random 32-byte hex for cookie HMAC (optional, generated if missing)
+
+# Legacy KV binding (no longer used; left as comment for reference):
+#   AEON_MEMORY — KV namespace, replaced by D1.
