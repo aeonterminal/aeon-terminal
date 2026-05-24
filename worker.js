@@ -757,9 +757,17 @@ async function handleExec(request, env) {
     try {
       tier = await resolveUserTier(env, user);
     } catch {
-      tier = { tier: "free", source: "plan" };
+      tier = { tier: "free", source: "plan", wallet: null };
     }
-    if (tier.source !== "holder") {
+    // Gate semantics: do they actually HOLD enough tokens?
+    // - tier.source === "holder" covers the common case (no plan, tokens unlock paid).
+    // - tier.wallet?.tier === "paid" covers the paid-subscriber-WHO-ALSO-holds case.
+    //   resolveUserTier marks source as "plan" when baselinePlan is already paid,
+    //   even if the wallet independently meets the threshold. We don't want to
+    //   penalize someone who paid AND holds — they qualify under either path.
+    const isHolder =
+      tier.source === "holder" || tier.wallet?.tier === "paid";
+    if (!isHolder) {
       const thresholdWei = tokenHolderThresholdWei(env).toString();
       return json(
         {
