@@ -9,6 +9,9 @@
 // Per-session memory uses the optional AEON_MEMORY KV binding. If the binding
 // is missing, the Worker degrades to stateless mode (each request fresh).
 
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { keccak_256 } from "@noble/hashes/sha3.js";
+
 // Skill registry. Keys are the slugs the terminal sends in `skill` field.
 // Each entry has either a real `persona` (instructs Claude how to use the
 // fetch_url / read_rss tools to produce real output) or `comingSoon: true`
@@ -764,20 +767,28 @@ async function handleExec(request, env) {
     );
   }
 
-  // Authenticated users get per-user memory + per-plan daily quota.
-  // Anonymous users keep the legacy IP-based rate limit and no memory.
+  // Authenticated users get per-user memory + per-tier daily quota. Tier is
+  // max(billing plan, holder-wallet tier) so $aeonterminal holders unlock the
+  // paid quota without needing a subscription.
   let limit;
   if (user) {
+    let tier;
     try {
-      limit = await dbCheckAndBumpUsage(env, user.id, mode, user.plan);
+      tier = await resolveUserTier(env, user);
+    } catch {
+      tier = { tier: user.plan === "paid" ? "paid" : "free", source: "plan" };
+    }
+    try {
+      limit = await dbCheckAndBumpUsage(env, user.id, mode, tier.tier);
     } catch {
       limit = { ok: true, remaining: null };
     }
     if (!limit.ok) {
+      const sourceLabel = tier.source === "holder" ? "holder" : limit.plan;
       return json(
         {
           error: "rate_limited",
-          message: `${mode === "ask" ? "asks" : "runs"}: ${limit.used}/${limit.limit} used today (${limit.plan}). Resets at UTC midnight.`,
+          message: `${mode === "ask" ? "asks" : "runs"}: ${limit.used}/${limit.limit} used today (${sourceLabel}). Resets at UTC midnight.`,
         },
         { status: 429 },
       );
@@ -1016,6 +1027,26 @@ async function ensureSchema(env) {
     )`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_user_skills_user_slug ON user_skills(user_id, slug)`,
     `CREATE INDEX IF NOT EXISTS idx_user_skills_visibility ON user_skills(visibility, created_at)`,
+    // One linked wallet per user. address is lowercase 0x-prefixed.
+    // balance_wei is a decimal string (uint256 can overflow Number); balance_at
+    // tracks the last on-chain refresh so we can cache.
+    `CREATE TABLE IF NOT EXISTS user_wallets (
+      user_id TEXT PRIMARY KEY,
+      address TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      verified_at INTEGER NOT NULL,
+      balance_wei TEXT NOT NULL DEFAULT '0',
+      balance_at INTEGER NOT NULL DEFAULT 0
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_user_wallets_addr ON user_wallets(address)`,
+    // Short-lived nonces signed by the wallet during the connect flow.
+    `CREATE TABLE IF NOT EXISTS wallet_nonces (
+      nonce TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      consumed_at INTEGER
+    )`,
   ];
   for (const sql of statements) {
     await env.DB.prepare(sql).run();
@@ -1487,6 +1518,415 @@ async function dbGetUsage(env, userId, plan) {
   };
 }
 
+// --- token-gated tier ---
+//
+// A signed-in user's effective tier is the max of their billing plan and any
+// linked wallet that holds ≥ TOKEN_HOLDER_THRESHOLD_WEI of $aeonterminal on
+// Base. Free + holder wallet → paid quotas. Stripe paid plan → paid quotas.
+//
+// Tier resolution caches the on-chain balance in `user_wallets.balance_wei`
+// for TOKEN_BALANCE_TTL_SEC. Reads piggyback on `currentUser` callers so the
+// balance is refreshed lazily — no background polling required.
+
+const TOKEN_CONTRACT_ADDRESS = "0xda3ffca86273037cddcf71aae2cdea6aef313285";
+const TOKEN_CHAIN_ID = 8453;
+const TOKEN_RPC_URL_DEFAULT = "https://mainnet.base.org";
+// 100,000 $aeonterminal (18 decimals) ≈ 0.01% of the 1B supply. Override via
+// the TOKEN_HOLDER_THRESHOLD_WEI worker variable if the unlock bar moves.
+const TOKEN_HOLDER_THRESHOLD_WEI_DEFAULT = 100_000n * 10n ** 18n;
+const TOKEN_BALANCE_TTL_SEC = 60 * 60; // 1h
+const WALLET_NONCE_TTL_SEC = 5 * 60;
+
+function tokenRpcUrl(env) {
+  return (env && env.TOKEN_RPC_URL) || TOKEN_RPC_URL_DEFAULT;
+}
+
+function tokenHolderThresholdWei(env) {
+  const raw = env && env.TOKEN_HOLDER_THRESHOLD_WEI;
+  if (!raw) return TOKEN_HOLDER_THRESHOLD_WEI_DEFAULT;
+  try {
+    return BigInt(String(raw));
+  } catch {
+    return TOKEN_HOLDER_THRESHOLD_WEI_DEFAULT;
+  }
+}
+
+function bytesToHex(b) {
+  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+function hexToBytes(hex) {
+  let h = hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
+  if (h.length % 2 !== 0) h = "0" + h;
+  const out = new Uint8Array(h.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(h.substr(i * 2, 2), 16);
+  }
+  return out;
+}
+
+function isHexAddress(s) {
+  return typeof s === "string" && /^0x[0-9a-fA-F]{40}$/.test(s);
+}
+
+function normalizeAddress(s) {
+  return s.toLowerCase();
+}
+
+// EIP-191 personal_sign recovery. Returns lowercase 0x-prefixed address or
+// throws on malformed input. Verified with @noble/curves v2 (recovered format
+// puts the v byte first).
+function recoverPersonalSignAddress(message, signatureHex) {
+  const sig = hexToBytes(signatureHex);
+  if (sig.length !== 65) throw new Error("bad_sig_length");
+  let v = sig[64];
+  if (v >= 27) v -= 27;
+  if (v !== 0 && v !== 1) throw new Error("bad_recovery_byte");
+  const sigForNoble = new Uint8Array(65);
+  sigForNoble[0] = v;
+  sigForNoble.set(sig.slice(0, 64), 1);
+  const msgBytes = new TextEncoder().encode(message);
+  const prefix = new TextEncoder().encode(
+    "\x19Ethereum Signed Message:\n" + msgBytes.length,
+  );
+  const full = new Uint8Array(prefix.length + msgBytes.length);
+  full.set(prefix, 0);
+  full.set(msgBytes, prefix.length);
+  const hash = keccak_256(full);
+  const compressed = secp256k1.recoverPublicKey(sigForNoble, hash, {
+    prehash: false,
+    format: "recovered",
+  });
+  const uncompressed = secp256k1.Point.fromBytes(compressed).toBytes(false);
+  // uncompressed = [0x04 | X(32) | Y(32)]; eth address = last 20 of keccak(X|Y)
+  const addrHash = keccak_256(uncompressed.slice(1));
+  return "0x" + bytesToHex(addrHash.slice(12));
+}
+
+function buildSiweMessage({ domain, address, nonce, issuedAt }) {
+  return [
+    `${domain} wants you to sign in with your Ethereum account:`,
+    address,
+    "",
+    "Link this wallet to your aeon.terminal account. Holding the threshold balance of $aeonterminal unlocks holder-tier quota.",
+    "",
+    `URI: https://${domain}/account`,
+    `Version: 1`,
+    `Chain ID: ${TOKEN_CHAIN_ID}`,
+    `Nonce: ${nonce}`,
+    `Issued At: ${issuedAt}`,
+  ].join("\n");
+}
+
+async function rpcCall(env, method, params) {
+  const res = await fetch(tokenRpcUrl(env), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    cf: { cacheTtl: 0, cacheEverything: false },
+  });
+  if (!res.ok) throw new Error(`rpc_http_${res.status}`);
+  const body = await res.json();
+  if (body.error) throw new Error(`rpc_error_${body.error.code || ""}`);
+  return body.result;
+}
+
+// ERC-20 balanceOf(address) selector = 0x70a08231
+async function fetchOnChainBalance(env, address) {
+  const addr = address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+  const data = "0x70a08231" + addr;
+  const result = await rpcCall(env, "eth_call", [
+    { to: TOKEN_CONTRACT_ADDRESS, data },
+    "latest",
+  ]);
+  if (!result || result === "0x") return 0n;
+  try {
+    return BigInt(result);
+  } catch {
+    return 0n;
+  }
+}
+
+async function dbUpsertWallet(env, userId, address, balanceWei, ts) {
+  await env.DB
+    .prepare(
+      `INSERT INTO user_wallets (user_id, address, chain_id, verified_at, balance_wei, balance_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         address = excluded.address,
+         chain_id = excluded.chain_id,
+         verified_at = excluded.verified_at,
+         balance_wei = excluded.balance_wei,
+         balance_at = excluded.balance_at`,
+    )
+    .bind(userId, address, TOKEN_CHAIN_ID, ts, balanceWei.toString(), ts)
+    .run();
+}
+
+async function dbGetWallet(env, userId) {
+  return env.DB
+    .prepare(
+      `SELECT user_id, address, chain_id, verified_at, balance_wei, balance_at
+         FROM user_wallets WHERE user_id = ?`,
+    )
+    .bind(userId)
+    .first();
+}
+
+async function dbDeleteWallet(env, userId) {
+  await env.DB
+    .prepare(`DELETE FROM user_wallets WHERE user_id = ?`)
+    .bind(userId)
+    .run();
+}
+
+async function dbUpdateWalletBalance(env, userId, balanceWei, ts) {
+  await env.DB
+    .prepare(
+      `UPDATE user_wallets SET balance_wei = ?, balance_at = ? WHERE user_id = ?`,
+    )
+    .bind(balanceWei.toString(), ts, userId)
+    .run();
+}
+
+async function dbStoreWalletNonce(env, userId, nonce) {
+  const ts = nowSec();
+  // Best-effort cleanup of expired nonces for this user before storing the new
+  // one — keeps the table small without needing a separate cron.
+  try {
+    await env.DB
+      .prepare(`DELETE FROM wallet_nonces WHERE user_id = ? AND expires_at < ?`)
+      .bind(userId, ts)
+      .run();
+  } catch {
+    // ignore
+  }
+  await env.DB
+    .prepare(
+      `INSERT INTO wallet_nonces (nonce, user_id, created_at, expires_at)
+       VALUES (?, ?, ?, ?)`,
+    )
+    .bind(nonce, userId, ts, ts + WALLET_NONCE_TTL_SEC)
+    .run();
+}
+
+async function dbConsumeWalletNonce(env, nonce, userId) {
+  const ts = nowSec();
+  const row = await env.DB
+    .prepare(
+      `SELECT user_id, expires_at, consumed_at FROM wallet_nonces WHERE nonce = ?`,
+    )
+    .bind(nonce)
+    .first();
+  if (!row) return { ok: false, reason: "unknown_nonce" };
+  if (row.consumed_at) return { ok: false, reason: "nonce_used" };
+  if (row.expires_at < ts) return { ok: false, reason: "nonce_expired" };
+  if (row.user_id !== userId) return { ok: false, reason: "nonce_mismatch" };
+  await env.DB
+    .prepare(`UPDATE wallet_nonces SET consumed_at = ? WHERE nonce = ?`)
+    .bind(ts, nonce)
+    .run();
+  return { ok: true };
+}
+
+function tierFromBalance(balanceWei, thresholdWei) {
+  return balanceWei >= thresholdWei ? "paid" : "free";
+}
+
+// Resolve a user's effective tier (and refresh the cached on-chain balance if
+// stale). Always returns a tier — falls back to plan when wallet calls error.
+async function resolveUserTier(env, user) {
+  const baselinePlan = user.plan === "paid" ? "paid" : "free";
+  if (!hasDb(env)) {
+    return {
+      tier: baselinePlan,
+      plan: baselinePlan,
+      source: "plan",
+      wallet: null,
+    };
+  }
+  let wallet;
+  try {
+    wallet = await dbGetWallet(env, user.id);
+  } catch {
+    wallet = null;
+  }
+  const threshold = tokenHolderThresholdWei(env);
+  if (!wallet) {
+    return {
+      tier: baselinePlan,
+      plan: baselinePlan,
+      source: "plan",
+      wallet: null,
+      threshold_wei: threshold.toString(),
+    };
+  }
+  let balanceWei = 0n;
+  try {
+    balanceWei = BigInt(wallet.balance_wei || "0");
+  } catch {
+    balanceWei = 0n;
+  }
+  const ts = nowSec();
+  const stale = (wallet.balance_at || 0) + TOKEN_BALANCE_TTL_SEC < ts;
+  if (stale) {
+    try {
+      balanceWei = await fetchOnChainBalance(env, wallet.address);
+      await dbUpdateWalletBalance(env, user.id, balanceWei, ts);
+    } catch {
+      // Soft-fail on RPC errors: keep the cached balance. We never block the
+      // user on a flaky public RPC.
+    }
+  }
+  const walletTier = tierFromBalance(balanceWei, threshold);
+  // Effective tier = max(plan, walletTier).
+  const tier = baselinePlan === "paid" || walletTier === "paid" ? "paid" : "free";
+  return {
+    tier,
+    plan: baselinePlan,
+    source: tier === "paid" && walletTier === "paid" && baselinePlan !== "paid" ? "holder" : "plan",
+    wallet: {
+      address: wallet.address,
+      chain_id: wallet.chain_id,
+      balance_wei: balanceWei.toString(),
+      balance_at: stale ? ts : wallet.balance_at,
+      verified_at: wallet.verified_at,
+      tier: walletTier,
+    },
+    threshold_wei: threshold.toString(),
+  };
+}
+
+// --- API: /api/wallet ---
+
+async function handleWallet(request, env) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS });
+  }
+  if (!hasDb(env)) return json({ error: "db_not_configured" }, { status: 503 });
+  await ensureSchema(env);
+
+  const url = new URL(request.url);
+  const path = url.pathname;
+  const user = await currentUser(request, env);
+  if (!user) return json({ error: "sign_in_required" }, { status: 401 });
+
+  if (path === "/api/wallet/me" && request.method === "GET") {
+    const tier = await resolveUserTier(env, user);
+    return json({ wallet: tier.wallet, tier });
+  }
+
+  if (path === "/api/wallet/me" && request.method === "DELETE") {
+    await dbDeleteWallet(env, user.id);
+    const tier = await resolveUserTier(env, user);
+    return json({ ok: true, tier });
+  }
+
+  if (path === "/api/wallet/refresh" && request.method === "POST") {
+    const wallet = await dbGetWallet(env, user.id);
+    if (!wallet) return json({ error: "no_wallet_linked" }, { status: 404 });
+    try {
+      const bal = await fetchOnChainBalance(env, wallet.address);
+      await dbUpdateWalletBalance(env, user.id, bal, nowSec());
+    } catch {
+      return json({ error: "rpc_failed" }, { status: 502 });
+    }
+    const tier = await resolveUserTier(env, user);
+    return json({ ok: true, tier });
+  }
+
+  if (path === "/api/wallet/nonce" && request.method === "POST") {
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {
+      // empty body is allowed; address is optional and shown in the message
+      body = {};
+    }
+    const rawAddress = body && body.address;
+    if (rawAddress != null && !isHexAddress(String(rawAddress))) {
+      return json({ error: "bad_address" }, { status: 400 });
+    }
+    const address = rawAddress ? normalizeAddress(String(rawAddress)) : null;
+    const nonce = newToken();
+    await dbStoreWalletNonce(env, user.id, nonce);
+    const issuedAt = new Date().toISOString();
+    const message = address
+      ? buildSiweMessage({
+          domain: CANONICAL_HOST,
+          address,
+          nonce,
+          issuedAt,
+        })
+      : null;
+    return json({
+      nonce,
+      issued_at: issuedAt,
+      expires_in: WALLET_NONCE_TTL_SEC,
+      domain: CANONICAL_HOST,
+      chain_id: TOKEN_CHAIN_ID,
+      uri: `https://${CANONICAL_HOST}/account`,
+      message,
+    });
+  }
+
+  if (path === "/api/wallet/verify" && request.method === "POST") {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "bad_json" }, { status: 400 });
+    }
+    const address = body && body.address;
+    const signature = body && body.signature;
+    const nonce = body && body.nonce;
+    const issuedAt = body && body.issued_at;
+    if (!isHexAddress(String(address || ""))) {
+      return json({ error: "bad_address" }, { status: 400 });
+    }
+    if (typeof signature !== "string" || !signature.startsWith("0x")) {
+      return json({ error: "bad_signature" }, { status: 400 });
+    }
+    if (typeof nonce !== "string" || !/^[a-f0-9]{16,128}$/.test(nonce)) {
+      return json({ error: "bad_nonce" }, { status: 400 });
+    }
+    if (typeof issuedAt !== "string" || issuedAt.length < 10 || issuedAt.length > 40) {
+      return json({ error: "bad_issued_at" }, { status: 400 });
+    }
+    const normAddr = normalizeAddress(String(address));
+    const consumed = await dbConsumeWalletNonce(env, nonce, user.id);
+    if (!consumed.ok) return json({ error: consumed.reason }, { status: 400 });
+    const message = buildSiweMessage({
+      domain: CANONICAL_HOST,
+      address: normAddr,
+      nonce,
+      issuedAt,
+    });
+    let recovered;
+    try {
+      recovered = recoverPersonalSignAddress(message, signature);
+    } catch {
+      return json({ error: "bad_signature" }, { status: 400 });
+    }
+    if (recovered.toLowerCase() !== normAddr) {
+      return json({ error: "signature_mismatch" }, { status: 400 });
+    }
+    const ts = nowSec();
+    let balanceWei = 0n;
+    try {
+      balanceWei = await fetchOnChainBalance(env, normAddr);
+    } catch {
+      // We still link the wallet on RPC failure; balance refresh will retry.
+      balanceWei = 0n;
+    }
+    await dbUpsertWallet(env, user.id, normAddr, balanceWei, ts);
+    const tier = await resolveUserTier(env, user);
+    return json({ ok: true, tier });
+  }
+
+  return json({ error: "not_found" }, { status: 404 });
+}
+
 // --- D1: OAuth state ---
 
 async function dbStoreOAuthState(env, state, provider, codeVerifier, redirectTo) {
@@ -1951,9 +2391,15 @@ async function handleMe(request, env) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   const user = await currentUser(request, env);
   if (!user) return json({ user: null });
+  let tier = null;
+  try {
+    tier = await resolveUserTier(env, user);
+  } catch {
+    tier = null;
+  }
   let usage = null;
   try {
-    usage = await dbGetUsage(env, user.id, user.plan);
+    usage = await dbGetUsage(env, user.id, tier ? tier.tier : user.plan);
   } catch {
     // ignore
   }
@@ -1966,6 +2412,7 @@ async function handleMe(request, env) {
       provider: user.primary_provider,
       plan: user.plan,
     },
+    tier,
     usage,
   });
 }
@@ -1991,7 +2438,8 @@ async function handleUserSkills(request, env) {
     const publicList = publicRows
       .filter((r) => !user || r.user_id !== user.id)
       .map((r) => serializeUserSkill(r));
-    const limit = user ? customSkillLimit(user.plan) : null;
+    const tier = user ? await resolveUserTier(env, user) : null;
+    const limit = user ? customSkillLimit(tier ? tier.tier : user.plan) : null;
     return json({
       mine,
       public: publicList,
@@ -2000,6 +2448,8 @@ async function handleUserSkills(request, env) {
             used: mine.length,
             limit,
             plan: user.plan,
+            tier: tier ? tier.tier : user.plan,
+            tier_source: tier ? tier.source : "plan",
           }
         : null,
     });
@@ -2019,12 +2469,14 @@ async function handleUserSkills(request, env) {
       return json({ error: "invalid_input", message: validation.error }, { status: 400 });
     }
     const count = await dbCountUserSkills(env, user.id);
-    const limit = customSkillLimit(user.plan);
+    const tier = await resolveUserTier(env, user);
+    const limit = customSkillLimit(tier.tier);
     if (count >= limit) {
+      const label = tier.source === "holder" ? "holder" : tier.tier;
       return json(
         {
           error: "quota_exceeded",
-          message: `You have ${count}/${limit} custom skills on the ${user.plan} plan. Delete one or upgrade.`,
+          message: `You have ${count}/${limit} custom skills on the ${label} tier. Delete one${tier.tier === "free" ? " or hold $aeonterminal to unlock more" : ""}.`,
         },
         { status: 429 },
       );
@@ -2223,6 +2675,10 @@ const worker = {
     if (path === "/api/auth/github/callback") return handleGithubCallback(request, env);
     if (path === "/api/auth/email/request") return handleEmailRequest(request, env);
     if (path === "/api/auth/email/verify") return handleEmailVerify(request, env);
+    if (path === "/api/wallet/nonce" || path === "/api/wallet/verify" ||
+        path === "/api/wallet/me" || path === "/api/wallet/refresh") {
+      return handleWallet(request, env);
+    }
 
     // Brand subdomains: redirect to canonical apex so we have one source of truth.
     const hostRule = HOST_REDIRECTS[url.hostname];

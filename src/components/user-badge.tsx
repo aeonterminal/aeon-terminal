@@ -12,6 +12,12 @@ type Me = {
     provider: string | null;
     plan: string;
   } | null;
+  tier?: {
+    tier: "free" | "paid";
+    plan: "free" | "paid";
+    source: "plan" | "holder";
+    wallet: { address: string; tier: "free" | "paid" } | null;
+  } | null;
   usage?: {
     day: string;
     asks: number;
@@ -104,6 +110,15 @@ export function UserBadge() {
   const runs = me.usage?.runs ?? 0;
   const askLimit = me.usage?.limits.asks ?? 30;
   const runLimit = me.usage?.limits.runs ?? 10;
+  const tierLabel =
+    me.tier?.source === "holder" ? "holder" : me.tier?.tier ?? user.plan;
+  const tierClass =
+    tierLabel === "holder"
+      ? "text-accent-2"
+      : tierLabel === "paid"
+        ? "text-accent"
+        : "text-accent";
+  const walletLinked = !!me.tier?.wallet;
 
   return (
     <div ref={ref} className="relative">
@@ -130,7 +145,7 @@ export function UserBadge() {
           {label}
         </span>
         <span className="hidden text-muted sm:inline">·</span>
-        <span className="hidden text-accent sm:inline">{user.plan}</span>
+        <span className={`hidden sm:inline ${tierClass}`}>{tierLabel}</span>
       </button>
       {open && (
         <div
@@ -157,7 +172,10 @@ export function UserBadge() {
               ) : null}
               <div className="text-muted">
                 via <span className="text-foreground">{user.provider}</span> ·{" "}
-                <span className="text-accent">{user.plan}</span>
+                <span className={tierClass}>{tierLabel}</span>
+                {walletLinked ? (
+                  <span className="text-muted-2"> · wallet</span>
+                ) : null}
               </div>
             </div>
           </div>
@@ -182,6 +200,13 @@ export function UserBadge() {
               className="rounded px-2 py-1 text-muted hover:bg-surface-2 hover:text-foreground"
             >
               open terminal →
+            </Link>
+            <Link
+              href="/account"
+              onClick={() => setOpen(false)}
+              className="rounded px-2 py-1 text-muted hover:bg-surface-2 hover:text-foreground"
+            >
+              {walletLinked ? "wallet linked →" : "connect wallet →"}
             </Link>
             <button
               type="button"

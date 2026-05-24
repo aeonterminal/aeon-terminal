@@ -43,7 +43,12 @@ export const ROADMAP: readonly RoadmapPhase[] = [
       {
         label: "custom skill creator",
         detail:
-          "build your own claude persona · name it, run it, share it · 3 per free account",
+          "build your own claude persona · name it, run it, share it · free 3 / holder 25",
+      },
+      {
+        label: "hold to unlock paid quota",
+        detail:
+          "wallet connect + on-chain balance check on base · holders skip the subscription · 200 asks + 50 runs/day",
       },
     ],
   },
@@ -55,12 +60,7 @@ export const ROADMAP: readonly RoadmapPhase[] = [
     items: [
       {
         label: "stripe billing",
-        detail: "paid plan · 200 asks + 50 runs / day · checkout + portal",
-      },
-      {
-        label: "hold to unlock paid quota",
-        detail:
-          "on-chain balance check on base · holders skip the subscription",
+        detail: "paid plan · checkout + portal · alternative to wallet-tier",
       },
       {
         label: "scheduled skill runs",
