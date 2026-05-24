@@ -11,7 +11,7 @@ export const metadata: Metadata = {
 
 export default function LoginPage() {
   return (
-    <main className="relative isolate flex min-h-[calc(100vh-7rem)] items-center justify-center px-4 py-12 sm:px-6 sm:py-16">
+    <main className="relative isolate flex min-h-[calc(100vh-3rem)] items-center justify-center px-4 py-10 sm:px-6 sm:py-16">
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0 dots opacity-40"

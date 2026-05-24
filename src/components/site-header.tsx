@@ -1,8 +1,9 @@
 import Link from "next/link";
 
+import { MobileNav } from "./mobile-nav";
 import { UserBadge } from "./user-badge";
 
-const NAV = [
+export const NAV = [
   { href: "/", label: "home" },
   { href: "/terminal", label: "terminal" },
   { href: "/skills", label: "skills" },
@@ -13,10 +14,10 @@ const NAV = [
 export function SiteHeader() {
   return (
     <header className="sticky top-0 z-30 border-b border-border bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="mx-auto flex h-12 max-w-6xl items-center justify-between px-4 sm:px-6">
+      <div className="mx-auto flex h-12 max-w-6xl items-center justify-between gap-2 px-4 sm:px-6">
         <Link
           href="/"
-          className="group flex items-center gap-2 text-sm font-medium tracking-tight"
+          className="group flex shrink-0 items-center gap-2 text-sm font-medium tracking-tight"
           aria-label="Aeon Terminal home"
         >
           <span
@@ -28,7 +29,9 @@ export function SiteHeader() {
             <span className="text-accent glow-accent">terminal</span>
           </span>
         </Link>
-        <nav className="flex items-center gap-1 text-xs sm:gap-2 sm:text-sm">
+
+        {/* desktop nav (sm and up) */}
+        <nav className="hidden items-center gap-2 text-sm sm:flex">
           {NAV.map((n) => (
             <Link
               key={n.href}
@@ -42,7 +45,7 @@ export function SiteHeader() {
             href="https://github.com/aeonterminal/aeon-terminal"
             target="_blank"
             rel="noopener noreferrer"
-            className="hidden rounded border border-border px-2 py-1 text-muted transition-colors hover:border-accent hover:text-accent sm:inline-block"
+            className="rounded border border-border px-2 py-1 text-muted transition-colors hover:border-accent hover:text-accent"
           >
             ↗ github
           </a>
@@ -50,6 +53,12 @@ export function SiteHeader() {
             <UserBadge />
           </span>
         </nav>
+
+        {/* mobile (below sm): user badge + hamburger */}
+        <div className="flex items-center gap-2 sm:hidden">
+          <UserBadge />
+          <MobileNav />
+        </div>
       </div>
     </header>
   );

@@ -618,7 +618,7 @@ export function InteractiveTerminal() {
     >
       <div
         ref={scrollRef}
-        className="no-scrollbar h-[560px] overflow-y-auto px-4 py-3 sm:px-5"
+        className="no-scrollbar h-[60vh] min-h-[360px] overflow-y-auto px-4 py-3 sm:h-[560px] sm:px-5"
       >
         <div className="text-muted">
           aeon·terminal · v0.1.0

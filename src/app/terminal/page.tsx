@@ -20,8 +20,8 @@ const QUICK = [
 
 export default function TerminalPage() {
   return (
-    <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6 lg:py-16">
-      <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
+    <div className="mx-auto max-w-6xl px-4 py-10 sm:px-6 sm:py-12 lg:py-16">
+      <div className="mb-6 flex flex-col gap-3 sm:mb-8 sm:flex-row sm:flex-wrap sm:items-end sm:justify-between sm:gap-4">
         <div>
           <p className="text-[11px] uppercase tracking-widest text-muted">
             $ /terminal
@@ -30,16 +30,18 @@ export default function TerminalPage() {
             Interactive Aeon Terminal
           </h1>
           <p className="mt-2 max-w-xl text-sm text-muted">
-            A real session backed by Claude. <code className="text-foreground">ask</code>{" "}
-            and <code className="text-foreground">run</code> hit the LLM; everything
-            else is local. Up/down for history, tab for completion, ctrl+c to cancel.
+            A real session backed by Claude.{" "}
+            <code className="text-foreground">ask</code> and{" "}
+            <code className="text-foreground">run</code> hit the LLM; everything
+            else is local. Up/down for history, tab for completion, ctrl+c to
+            cancel.
           </p>
         </div>
         <a
           href="https://github.com/aaronjmars/aeon"
           target="_blank"
           rel="noopener noreferrer"
-          className="text-sm text-muted transition-colors hover:text-accent"
+          className="text-xs text-muted transition-colors hover:text-accent sm:text-sm"
         >
           looking for the real one? aeon ↗
         </a>
