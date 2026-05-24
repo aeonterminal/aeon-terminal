@@ -1680,6 +1680,27 @@ async function dbDeleteWallet(env, userId) {
     .run();
 }
 
+// Look up which user (if any) currently has a given wallet linked. Used to
+// transfer the link when the same address re-verifies under a different
+// account.
+async function dbWalletOwnerForAddress(env, address) {
+  const row = await env.DB
+    .prepare(`SELECT user_id FROM user_wallets WHERE address = ? LIMIT 1`)
+    .bind(address.toLowerCase())
+    .first();
+  return row ? row.user_id : null;
+}
+
+// Used during verify to enforce "one wallet linked to at most one account at a
+// time". Signing again proves current control of the wallet, so transferring
+// the link to the new account is safe.
+async function dbDeleteWalletByAddress(env, address) {
+  await env.DB
+    .prepare(`DELETE FROM user_wallets WHERE address = ?`)
+    .bind(address.toLowerCase())
+    .run();
+}
+
 async function dbUpdateWalletBalance(env, userId, balanceWei, ts) {
   await env.DB
     .prepare(
@@ -1911,6 +1932,21 @@ async function handleWallet(request, env) {
     if (recovered.toLowerCase() !== normAddr) {
       return json({ error: "signature_mismatch" }, { status: 400 });
     }
+    // Enforce 1-wallet-1-account: if this address is already linked to a
+    // different user, transfer the link. The signer just proved current
+    // control, so the new account wins. This prevents a single holder wallet
+    // from unlocking paid quota on N accounts simultaneously.
+    let transferred = false;
+    try {
+      const prevOwner = await dbWalletOwnerForAddress(env, normAddr);
+      if (prevOwner && prevOwner !== user.id) {
+        await dbDeleteWalletByAddress(env, normAddr);
+        transferred = true;
+      }
+    } catch {
+      // If the lookup fails, fall through to upsert — the unique constraint
+      // is best-effort defense-in-depth, not a hard invariant.
+    }
     const ts = nowSec();
     let balanceWei = 0n;
     try {
@@ -1921,7 +1957,7 @@ async function handleWallet(request, env) {
     }
     await dbUpsertWallet(env, user.id, normAddr, balanceWei, ts);
     const tier = await resolveUserTier(env, user);
-    return json({ ok: true, tier });
+    return json({ ok: true, tier, transferred });
   }
 
   return json({ error: "not_found" }, { status: 404 });
