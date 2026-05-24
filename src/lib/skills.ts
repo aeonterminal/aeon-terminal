@@ -26,6 +26,13 @@ export type Skill = {
    * Only meaningful when `comingSoon: true`.
    */
   requires?: string;
+  /**
+   * Skill is gated to $aeonterminal holders only. Free + paid tiers see a
+   * "hold to unlock" lock state on the card and the worker rejects run
+   * calls from non-holders with `error: "holder_only"`. Holders (tier
+   * source === "holder") get full access without an extra subscription.
+   */
+  holderOnly?: boolean;
 };
 
 export const CATEGORIES: Record<
@@ -147,6 +154,7 @@ export const SKILLS: Skill[] = [
     cron: "*/5 * * * *",
     comingSoon: true,
     requires: "GitHub OAuth scope `repo` (write access)",
+    holderOnly: true,
   },
   {
     slug: "code-health",
@@ -218,6 +226,7 @@ export const SKILLS: Skill[] = [
     cron: "0 9 * * *",
     comingSoon: true,
     requires: "TokenUnlocks / Cryptorank API (paid tier)",
+    holderOnly: true,
   },
   {
     slug: "treasury-info",
@@ -273,6 +282,7 @@ export const SKILLS: Skill[] = [
     cron: "@manual",
     comingSoon: true,
     requires: "Per-platform OAuth (X, Farcaster, LinkedIn)",
+    holderOnly: true,
   },
 
   // productivity

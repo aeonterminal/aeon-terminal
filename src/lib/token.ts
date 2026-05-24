@@ -58,11 +58,10 @@ export const UTILITIES: readonly TokenUtility[] = [
     slug: "holder-skills",
     title: "Holder-only skills",
     summary:
-      "Advanced research, write-access GitHub flows, and longer context windows.",
+      "Premium catalog slots — write-access, alpha signals, multi-platform syndication — reserved for holders.",
     detail:
-      "Higher-cost skills — multi-step deep research, GitHub PR write-access (auto-merge, pr-comment), 32k context jobs — gated to holders. The catalog will label these explicitly on each card.",
-    status: "planned",
-    blockedBy: "Token-gated route guard + write OAuth scope",
+      "First 3 holder-only skills tagged in the catalog now: auto-merge (GitHub write access), unlock-monitor (token unlock signals), syndicate-article (cross-platform post). When each ships its real integration, holders run them free; non-holders hit a clear 'hold 100k $aeonterminal' gate at the worker. Gate is enforced server-side in handleExec, not just visual.",
+    status: "live",
   },
   {
     slug: "skill-vote",
