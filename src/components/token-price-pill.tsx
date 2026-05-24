@@ -12,9 +12,13 @@ import { TOKEN } from "@/lib/token";
 
 const POLL_MS = 60_000;
 
+type PillState =
+  | { kind: "loading" }
+  | { kind: "ok"; snap: TokenPriceSnapshot }
+  | { kind: "hidden" };
+
 export function TokenPricePill() {
-  const [snap, setSnap] = useState<TokenPriceSnapshot | null>(null);
-  const [hidden, setHidden] = useState(false);
+  const [state, setState] = useState<PillState>({ kind: "loading" });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -25,11 +29,10 @@ export function TokenPricePill() {
       const result = await fetchTokenPrice(controller.signal);
       if (cancelled) return;
       if (!result) {
-        if (!snap) setHidden(true);
+        setState((prev) => (prev.kind === "ok" ? prev : { kind: "hidden" }));
         return;
       }
-      setSnap(result);
-      setHidden(false);
+      setState({ kind: "ok", snap: result });
     };
 
     void load();
@@ -40,11 +43,11 @@ export function TokenPricePill() {
       controller.abort();
       if (timer) clearInterval(timer);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (hidden || !snap) return null;
+  if (state.kind !== "ok") return null;
 
+  const { snap } = state;
   const up = snap.change24h >= 0;
   const changeColor = up ? "text-accent-2" : "text-[#ff6e6e]";
 
