@@ -71,6 +71,9 @@ export function SiteFooter() {
           <Link href="/skills" className="hover:text-foreground">
             skills
           </Link>
+          <Link href="/token" className="hover:text-foreground">
+            token
+          </Link>
           <Link href="/about" className="hover:text-foreground">
             about
           </Link>

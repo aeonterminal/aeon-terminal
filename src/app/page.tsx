@@ -8,6 +8,8 @@ import {
   SKILL_COUNT_BY_CATEGORY,
   type SkillCategory,
 } from "@/lib/skills";
+import { ROADMAP } from "@/lib/roadmap";
+import { TOKEN } from "@/lib/token";
 
 const FEATURED_SLUGS = [
   "morning-brief",
@@ -260,6 +262,88 @@ export default function HomePage() {
               </tbody>
             </table>
           </div>
+        </div>
+      </section>
+
+      {/* TOKEN + ROADMAP TEASER */}
+      <section className="border-b border-border">
+        <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
+          <div className="mb-8 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+            <div>
+              <p className="text-[11px] uppercase tracking-widest text-muted">
+                $ aeon token --summary
+              </p>
+              <h2 className="mt-1 text-2xl tracking-tight text-foreground sm:text-3xl">
+                <span className="text-muted">$</span>
+                <span className="text-accent glow-accent">aeonterminal</span>
+                <span className="text-muted"> · </span>access &amp; steering
+                for the terminal.
+              </h2>
+              <p className="mt-3 max-w-3xl text-sm leading-relaxed text-muted">
+                Hold $aeonterminal to unlock paid quota, holder-only skills,
+                and a vote on which scaffolded skill ships next. Token launched
+                on {TOKEN.chain} via {TOKEN.launchpad}.
+              </p>
+            </div>
+            <Link
+              href="/token"
+              className="inline-flex w-fit items-center gap-2 rounded border border-accent bg-accent/10 px-4 py-2 text-sm text-accent transition-colors hover:bg-accent/20"
+            >
+              <span aria-hidden>{">"}</span> token &amp; roadmap
+            </Link>
+          </div>
+          <ol className="grid gap-px overflow-hidden rounded border border-border bg-border sm:grid-cols-2 lg:grid-cols-4">
+            {ROADMAP.map((phase) => {
+              const tone =
+                phase.status === "shipped"
+                  ? "text-accent-2"
+                  : phase.status === "wip"
+                    ? "text-accent"
+                    : "text-muted";
+              const dot =
+                phase.status === "shipped"
+                  ? "bg-accent-2 shadow-[0_0_10px_var(--accent-2)]"
+                  : phase.status === "wip"
+                    ? "bg-accent shadow-[0_0_10px_var(--accent)]"
+                    : phase.status === "planned"
+                      ? "bg-muted"
+                      : "border border-muted-2 bg-transparent";
+              return (
+                <li key={phase.slug} className="bg-surface p-4">
+                  <p className="text-[10px] uppercase tracking-widest text-muted-2">
+                    {phase.quarter}
+                  </p>
+                  <p className="mt-2 flex items-center gap-2 text-sm text-foreground">
+                    <span
+                      aria-hidden
+                      className={`inline-block h-2 w-2 rounded-full ${dot}`}
+                    />
+                    {phase.title}
+                  </p>
+                  <p
+                    className={`mt-1 text-[10px] uppercase tracking-widest ${tone}`}
+                  >
+                    {phase.status === "shipped"
+                      ? "shipped"
+                      : phase.status === "wip"
+                        ? "in progress"
+                        : phase.status === "planned"
+                          ? "planned"
+                          : "horizon"}
+                  </p>
+                  <p className="mt-2 text-[11px] leading-relaxed text-muted">
+                    {phase.items[0].label}
+                    {phase.items.length > 1 ? (
+                      <span className="text-muted-2">
+                        {" "}
+                        · {phase.items.length - 1} more
+                      </span>
+                    ) : null}
+                  </p>
+                </li>
+              );
+            })}
+          </ol>
         </div>
       </section>
 
