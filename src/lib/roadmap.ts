@@ -50,6 +50,11 @@ export const ROADMAP: readonly RoadmapPhase[] = [
         detail:
           "wallet connect + on-chain balance check on base · holders skip the subscription · 200 asks + 50 runs/day",
       },
+      {
+        label: "live /status page",
+        detail:
+          "real probes (worker · d1 · base rpc · dexscreener · github) + usage counters + per-skill activity · 30s poll",
+      },
     ],
   },
   {

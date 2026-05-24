@@ -2724,6 +2724,169 @@ function redirectToCanonical(url, basePath) {
   return Response.redirect(target.toString(), 302);
 }
 
+// ---------------------------------------------------------------------------
+// /api/status — public health & usage signals.
+//
+// Public (unauthenticated). Cached 30s at the edge via Cache-Control. All
+// numbers come from the same D1 tables the rest of the app writes to (no
+// fudged data, no demo numbers). Skill-activity timestamps are pulled from
+// memory_runs which is capped at LATEST_RUNS_KEEP per user, so it reflects
+// "recent activity" rather than lifetime counts — labelled accordingly in
+// the payload.
+// ---------------------------------------------------------------------------
+async function probeWithTimeout(label, fn, timeoutMs = 2500) {
+  const start = Date.now();
+  try {
+    const result = await Promise.race([
+      fn(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("timeout")), timeoutMs),
+      ),
+    ]);
+    return {
+      ok: true,
+      latency_ms: Date.now() - start,
+      ...(typeof result === "object" && result ? result : {}),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      latency_ms: Date.now() - start,
+      error: (e && e.message) || String(e),
+    };
+  }
+}
+
+async function handleStatus(request, env) {
+  if (request.method !== "GET") {
+    return json({ error: "method_not_allowed" }, { status: 405 });
+  }
+  const startedAt = Date.now();
+  const now = nowSec();
+  const today = utcDay(now);
+
+  await ensureSchema(env);
+
+  const liveSkillSlugs = Object.entries(SKILL_REGISTRY)
+    .filter(([, v]) => !v.comingSoon)
+    .map(([k]) => k);
+  const totalSkills = Object.keys(SKILL_REGISTRY).length;
+
+  const probes = {
+    d1: await probeWithTimeout("d1", async () => {
+      const row = await env.DB.prepare("SELECT 1 AS ok").first();
+      return { result: row && row.ok === 1 ? "pong" : "unexpected" };
+    }),
+    base_rpc: await probeWithTimeout("base_rpc", async () => {
+      const blockHex = await rpcCall(env, "eth_blockNumber", []);
+      return { block_number: Number.parseInt(blockHex, 16) };
+    }),
+    dexscreener: await probeWithTimeout("dexscreener", async () => {
+      const res = await fetch(
+        `https://api.dexscreener.com/latest/dex/tokens/${TOKEN_CONTRACT_ADDRESS}`,
+        { cf: { cacheTtl: 0 } },
+      );
+      if (!res.ok) throw new Error(`http_${res.status}`);
+      return {};
+    }),
+    github: await probeWithTimeout("github", async () => {
+      const res = await fetch("https://api.github.com/zen", {
+        cf: { cacheTtl: 0 },
+      });
+      if (!res.ok) throw new Error(`http_${res.status}`);
+      return {};
+    }),
+  };
+
+  const [askRow, runRow, usersRow, walletsRow, activeRow, usersDayRow, runsByRow] =
+    await Promise.all([
+      env.DB.prepare(
+        `SELECT COALESCE(SUM(asks), 0) AS s FROM usage_daily WHERE day = ?`,
+      )
+        .bind(today)
+        .first(),
+      env.DB.prepare(
+        `SELECT COALESCE(SUM(runs), 0) AS s FROM usage_daily WHERE day = ?`,
+      )
+        .bind(today)
+        .first(),
+      env.DB.prepare(`SELECT COUNT(*) AS c FROM users`).first(),
+      env.DB.prepare(`SELECT COUNT(*) AS c FROM user_wallets`).first(),
+      env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM usage_daily WHERE day = ? AND (asks > 0 OR runs > 0)`,
+      )
+        .bind(today)
+        .first(),
+      env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM users WHERE created_at >= ?`,
+      )
+        .bind(now - 86400)
+        .first(),
+      env.DB.prepare(
+        `SELECT skill, COUNT(*) AS n, MAX(created_at) AS last_at
+           FROM memory_runs WHERE skill IS NOT NULL AND skill <> ''
+           GROUP BY skill ORDER BY last_at DESC`,
+      ).all(),
+    ]);
+
+  const skillStats = new Map();
+  if (runsByRow && Array.isArray(runsByRow.results)) {
+    for (const row of runsByRow.results) {
+      skillStats.set(row.skill, {
+        recent_runs: row.n,
+        last_at: row.last_at,
+      });
+    }
+  }
+  const skillsRecent = liveSkillSlugs.map((slug) => {
+    const stat = skillStats.get(slug);
+    return {
+      slug,
+      last_at: stat ? stat.last_at : null,
+      last_ago_sec: stat ? Math.max(0, now - stat.last_at) : null,
+      recent_runs: stat ? stat.recent_runs : 0,
+    };
+  });
+
+  const counters = {
+    users_total: usersRow ? usersRow.c : 0,
+    users_24h: usersDayRow ? usersDayRow.c : 0,
+    wallets_linked: walletsRow ? walletsRow.c : 0,
+    asks_today: askRow ? askRow.s : 0,
+    runs_today: runRow ? runRow.s : 0,
+    active_today: activeRow ? activeRow.c : 0,
+  };
+
+  const allOk = Object.values(probes).every((p) => p.ok);
+  const payload = {
+    ok: allOk,
+    now,
+    now_iso: new Date(now * 1000).toISOString(),
+    day: today,
+    probes,
+    counters,
+    skills: {
+      total: totalSkills,
+      live: liveSkillSlugs.length,
+      coming_soon: totalSkills - liveSkillSlugs.length,
+      recent: skillsRecent,
+      recent_note:
+        "memory_runs is capped per-user, so recent_runs reflects last-N activity per account rather than lifetime counts.",
+    },
+    took_ms: Date.now() - startedAt,
+  };
+
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      // Edge-cache 30s, allow stale for 60s while revalidating
+      "cache-control":
+        "public, max-age=30, s-maxage=30, stale-while-revalidate=60",
+    },
+  });
+}
+
 async function handleMemory(request, env) {
   if (request.method === "OPTIONS") {
     return new Response(null, {
@@ -2771,6 +2934,7 @@ const worker = {
     if (path === "/api/exec") return handleExec(request, env);
     if (path === "/api/memory") return handleMemory(request, env);
     if (path === "/api/me") return handleMe(request, env);
+    if (path === "/api/status") return handleStatus(request, env);
     if (path === "/api/skills" || path.startsWith("/api/skills/")) {
       return handleUserSkills(request, env);
     }

@@ -77,6 +77,9 @@ export function SiteFooter() {
           <Link href="/about" className="hover:text-foreground">
             about
           </Link>
+          <Link href="/status" className="hover:text-foreground">
+            status
+          </Link>
           <a
             href="https://x.com/aeon_terminal"
             target="_blank"
