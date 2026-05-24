@@ -15,6 +15,17 @@ export type Skill = {
   inputs?: string[];
   outputs?: string[];
   selfHealing?: boolean;
+  /**
+   * True when the skill is in the catalog but not yet backed by a real
+   * integration. Renders with a "Coming Soon" badge in /skills, and the
+   * worker short-circuits run calls with an honest message.
+   */
+  comingSoon?: boolean;
+  /**
+   * Short description of what's needed before the skill can be enabled.
+   * Only meaningful when `comingSoon: true`.
+   */
+  requires?: string;
 };
 
 export const CATEGORIES: Record<
@@ -131,6 +142,8 @@ export const SKILLS: Skill[] = [
     summary:
       "Watches the merge queue. Lands ready PRs that pass policy and CI.",
     cron: "*/5 * * * *",
+    comingSoon: true,
+    requires: "GitHub OAuth scope `repo` (write access)",
   },
   {
     slug: "code-health",
@@ -154,6 +167,8 @@ export const SKILLS: Skill[] = [
       "Spins up a Vercel preview from a description. Returns the URL.",
     cron: "@manual",
     inputs: ["prompt"],
+    comingSoon: true,
+    requires: "Vercel API token",
   },
   {
     slug: "create-skill",
@@ -162,6 +177,8 @@ export const SKILLS: Skill[] = [
     summary:
       "Generates a new skill from a one-line description and registers it.",
     cron: "@manual",
+    comingSoon: true,
+    requires: "User-defined skill store (D1 + admin UI)",
   },
 
   // crypto
@@ -179,6 +196,8 @@ export const SKILLS: Skill[] = [
     category: "crypto",
     summary: "Watches wallets, contracts, and flows for material moves.",
     cron: "*/5 * * * *",
+    comingSoon: true,
+    requires: "Etherscan/Alchemy API key + watchlist",
   },
   {
     slug: "defi-monitor",
@@ -194,6 +213,8 @@ export const SKILLS: Skill[] = [
     category: "crypto",
     summary: "Flags token unlocks before they hit, with float context.",
     cron: "0 9 * * *",
+    comingSoon: true,
+    requires: "TokenUnlocks / Cryptorank API (paid tier)",
   },
   {
     slug: "treasury-info",
@@ -210,6 +231,8 @@ export const SKILLS: Skill[] = [
     category: "social",
     summary: "Drafts tweets in your voice. Threads when the idea deserves it.",
     cron: "@manual",
+    comingSoon: true,
+    requires: "X/Twitter API v2 + per-user OAuth",
   },
   {
     slug: "thread-formatter",
@@ -217,6 +240,8 @@ export const SKILLS: Skill[] = [
     category: "social",
     summary: "Turn long-form notes into a readable thread.",
     cron: "@manual",
+    comingSoon: true,
+    requires: "Style profile + draft store",
   },
   {
     slug: "reply-maker",
@@ -225,6 +250,8 @@ export const SKILLS: Skill[] = [
     summary:
       "Suggests replies to mentions and DMs. You approve before sending.",
     cron: "*/30 * * * *",
+    comingSoon: true,
+    requires: "X/Twitter API v2 + per-user OAuth",
   },
   {
     slug: "farcaster-digest",
@@ -232,6 +259,8 @@ export const SKILLS: Skill[] = [
     category: "social",
     summary: "Pulls the day from the casts you actually care about.",
     cron: "0 18 * * *",
+    comingSoon: true,
+    requires: "Neynar / Farcaster Hub API + FID watchlist",
   },
   {
     slug: "syndicate-article",
@@ -239,6 +268,8 @@ export const SKILLS: Skill[] = [
     category: "social",
     summary: "Push a new post across Twitter, Farcaster, LinkedIn, blog.",
     cron: "@manual",
+    comingSoon: true,
+    requires: "Per-platform OAuth (X, Farcaster, LinkedIn)",
   },
 
   // productivity
@@ -249,6 +280,8 @@ export const SKILLS: Skill[] = [
     summary:
       "Reminds you of your routine without being annoying about it.",
     cron: "0 7,12,18 * * *",
+    comingSoon: true,
+    requires: "User routine schema + push channel",
   },
   {
     slug: "evening-recap",
@@ -256,6 +289,8 @@ export const SKILLS: Skill[] = [
     category: "productivity",
     summary: "What happened today, what shipped, what you owe people.",
     cron: "0 21 * * *",
+    comingSoon: true,
+    requires: "Activity ingestion (calendar, git, inbox)",
   },
   {
     slug: "goal-tracker",
@@ -263,6 +298,8 @@ export const SKILLS: Skill[] = [
     category: "productivity",
     summary: "Keeps your goals visible. Nudges when one slips for a week.",
     cron: "0 8 * * 1",
+    comingSoon: true,
+    requires: "Per-user goal store + cron nudges",
   },
   {
     slug: "weekly-review",
@@ -270,6 +307,8 @@ export const SKILLS: Skill[] = [
     category: "productivity",
     summary: "Sunday review of the week: shipped, learned, dropped.",
     cron: "0 19 * * 0",
+    comingSoon: true,
+    requires: "Activity ingestion (calendar, git, inbox)",
   },
   {
     slug: "idea-capture",
@@ -277,6 +316,8 @@ export const SKILLS: Skill[] = [
     category: "productivity",
     summary: "Sticky-notes voice notes and Telegram thoughts into memory/.",
     cron: "@reactive",
+    comingSoon: true,
+    requires: "Telegram / Discord ingestion bot",
   },
 
   // meta
@@ -287,6 +328,8 @@ export const SKILLS: Skill[] = [
     summary:
       "A signal-of-life ping so you know agents are alive and the wiring works.",
     cron: "0 * * * *",
+    comingSoon: true,
+    requires: "Agent fleet metrics pipeline",
   },
   {
     slug: "skill-repair",
@@ -296,6 +339,8 @@ export const SKILLS: Skill[] = [
       "When a skill fails, opens an issue, patches the file, and tests the fix.",
     cron: "@reactive",
     selfHealing: true,
+    comingSoon: true,
+    requires: "Skill repo write access + CI hook",
   },
   {
     slug: "skill-evals",
@@ -304,6 +349,8 @@ export const SKILLS: Skill[] = [
     summary:
       "Scores each skill's output quality. Flags drift before you do.",
     cron: "0 3 * * *",
+    comingSoon: true,
+    requires: "Eval harness + judge model wiring",
   },
   {
     slug: "self-improve",
@@ -311,6 +358,8 @@ export const SKILLS: Skill[] = [
     category: "meta",
     summary: "Identifies the lowest-leverage skill and proposes a replacement.",
     cron: "0 4 * * 0",
+    comingSoon: true,
+    requires: "Skill usage telemetry + proposal pipeline",
   },
   {
     slug: "skill-health",
@@ -318,6 +367,8 @@ export const SKILLS: Skill[] = [
     category: "meta",
     summary: "Pass/fail rates, anomalies, recent failures across the fleet.",
     cron: "0 */6 * * *",
+    comingSoon: true,
+    requires: "Run-result store + anomaly detector",
   },
   {
     slug: "fleet-state",
@@ -325,6 +376,8 @@ export const SKILLS: Skill[] = [
     category: "meta",
     summary: "What other Aeon instances are doing right now.",
     cron: "0 12 * * *",
+    comingSoon: true,
+    requires: "Federated fleet registry",
   },
 ];
 

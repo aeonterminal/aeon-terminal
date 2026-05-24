@@ -23,4 +23,5 @@ database_id = "60b9c5d6-151e-4971-a78c-22a24617ff58"
 #   GITHUB_CLIENT_ID      — GitHub OAuth 2.0 client id
 #   GITHUB_CLIENT_SECRET  — GitHub OAuth 2.0 client secret
 #   RESEND_API_KEY        — Resend API key for email magic links
+#   GITHUB_API_TOKEN      — GitHub fine-grained PAT (public repos, read-only) for skill API calls
 #   EMAIL_FROM            — (optional) From address, defaults to "Aeon Terminal <login@aeonterminal.org>"

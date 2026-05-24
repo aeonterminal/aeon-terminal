@@ -9,224 +9,246 @@
 // Per-session memory uses the optional AEON_MEMORY KV binding. If the binding
 // is missing, the Worker degrades to stateless mode (each request fresh).
 
+// Skill registry. Keys are the slugs the terminal sends in `skill` field.
+// Each entry has either a real `persona` (instructs Claude how to use the
+// fetch_url / read_rss tools to produce real output) or `comingSoon: true`
+// (handleExec short-circuits with an honest "not yet available" response).
 const SKILL_REGISTRY = {
+  // --- research (all real, RSS + fetch-driven) ---
+
   "morning-brief": {
     name: "morning-brief",
     summary:
       "A focused, voice-matched briefing of the world before you open your laptop.",
     persona:
-      "Produce a 6-8 bullet morning briefing: 2 tech, 2 markets, 1 culture, 1 inbox-style nudge. Use the read_rss tool on https://hnrss.org/frontpage and https://feeds.bbci.co.uk/news/world/rss.xml to pull real headlines, then synthesize. Keep each bullet to one line.",
+      "Produce a 6-8 bullet morning briefing: 2 tech, 2 markets, 1 culture, 1 inbox-style nudge. Use the read_rss tool on https://hnrss.org/frontpage and https://feeds.bbci.co.uk/news/world/rss.xml to pull real headlines, then synthesize. Each bullet one line, cite the source domain at the end of the line.",
   },
   "deep-research": {
     name: "deep-research",
     summary:
       "Multi-pass investigation of a topic with sourced claims and citations.",
     persona:
-      "If the user gave a URL, fetch_url it; otherwise infer a topic from the prompt and either fetch a relevant authoritative source or generate from knowledge. Output a one-line topic restatement, 3 numbered findings with citations (URL + source), and one open question.",
+      "If the user prompt contains a URL, fetch_url it first. Then either fetch_url the top relevant result or rely on knowledge. Output: one-line topic restatement, 3 numbered findings each with a citation (URL + source domain), and one open question. Do not invent URLs — only cite domains you fetched or know exist.",
   },
   "paper-digest": {
     name: "paper-digest",
     summary: "Arxiv + Hugging Face papers, filtered to what matters this week.",
     persona:
-      "Call read_rss on http://export.arxiv.org/rss/cs.AI to get the latest AI papers. Pick 3 most interesting, output title + arxiv link + one-line takeaway each. End with 'Skim queue: <n> · Read queue: 3'.",
+      "Call read_rss on http://export.arxiv.org/rss/cs.AI to get the latest AI papers. Pick the 3 most interesting, output title + real arxiv link + one-line takeaway each. End with 'Skim queue: <n> · Read queue: 3' where <n> is the remaining items.",
   },
   "hacker-news-digest": {
     name: "hacker-news-digest",
     summary: "Top stories with takes, not just links. Three minute read.",
     persona:
-      "Call read_rss on https://hnrss.org/frontpage?count=15 to pull real HN headlines. Pick 4 top stories, list each with a snarky-but-useful one-line take. End with 'Skipped: <n> low-signal'.",
+      "Call read_rss on https://hnrss.org/frontpage?count=15 to pull real HN headlines. Pick 4 top stories, list each with a snarky-but-useful one-line take and the real URL. End with 'Skipped: <n> low-signal' where <n> is items dropped.",
   },
   "rss-digest": {
     name: "rss-digest",
     summary: "Roll up any RSS feed into a single coherent thread.",
     persona:
-      "Expect a feed URL in the prompt. Call read_rss on it. Synthesize the latest 5 items into one 4-line narrative paragraph. If no URL given, use https://hnrss.org/frontpage as a fallback.",
+      "Expect a feed URL in the prompt. Call read_rss on it. Synthesize the latest 5 items into one 4-line narrative paragraph that cites at least 2 item titles verbatim. If no URL given, default to https://hnrss.org/frontpage and say so.",
   },
   "technical-explainer": {
     name: "technical-explainer",
     summary: "Convert a paper or PR into a clean explainer you can publish.",
     persona:
-      "If a URL is provided, fetch_url it. Output: one-line hook, three 'what changed' lines, one 'why it matters' line. If no URL, pick a recent topic from knowledge.",
+      "If a URL is provided, fetch_url it. Output: one-line hook, three 'what changed' lines, one 'why it matters' line, ending with a citation line 'source: <domain>'. If no URL, ask the user to provide one in a single short sentence.",
   },
+
+  // --- dev ---
 
   "pr-review": {
     name: "pr-review",
     summary:
       "Reviews PRs against project conventions. Leaves inline comments via gh.",
     persona:
-      "If a GitHub PR URL is provided, fetch_url it and review actual code. Otherwise output a fake review of an imaginary PR: 'PR #1234 · /src/handler.ts'. List 3 inline comments with line numbers and a final verdict ('LGTM with nits' / 'Block: ' / etc).",
+      "Expect a GitHub PR URL in the prompt (format: https://github.com/<owner>/<repo>/pull/<n>). Steps: 1) fetch_url https://api.github.com/repos/<owner>/<repo>/pulls/<n> to get PR metadata (title, author, base/head, additions/deletions). 2) fetch_url https://patch-diff.githubusercontent.com/raw/<owner>/<repo>/pull/<n>.diff to get the actual code diff. 3) Review the diff. Output header 'PR #<n> · <owner>/<repo> · +<additions>/-<deletions>'. Then 3-5 inline comments formatted as 'path/to/file.ext:<line>  <observation>'. End with one of: 'Verdict: LGTM', 'Verdict: LGTM with nits', or 'Verdict: Block — <one-line reason>'. If no PR URL in the prompt, reply with one line asking the user to paste one.",
   },
   "github-monitor": {
     name: "github-monitor",
     summary:
       "Tracks issues, releases, stars, and trending across a watchlist of repos.",
     persona:
-      "If a repo URL/path is in the prompt, fetch_url https://github.com/<repo> and summarize movement. Otherwise output 3 lines like 'aeonterminal/aeon-terminal +12★ · 1 release · 2 issues'.",
+      "Expect one or more GitHub repos in the prompt (format: <owner>/<repo> or full URL). For each repo, fetch_url https://api.github.com/repos/<owner>/<repo> for stars/forks/open_issues, then fetch_url https://api.github.com/repos/<owner>/<repo>/releases/latest for the latest release tag. Output one line per repo: '<owner>/<repo> · <stars>★ · <open_issues> issues · latest: <tag> (<published_at slice 0,10>)'. If no repo provided, ask the user for one in a single short line.",
   },
   "auto-merge": {
     name: "auto-merge",
     summary: "Watches the merge queue. Lands ready PRs that pass policy and CI.",
-    persona:
-      "Output a fake merge ledger: 3-4 lines like '✓ merged #4521 · ci 2m18s · author kevin'. End with 'Queue depth: 0'.",
+    comingSoon: true,
+    requires: "GitHub OAuth scope `repo` (write access) — not yet wired.",
   },
   "code-health": {
     name: "code-health",
     summary: "Lints repo health: stale deps, dead routes, untyped surfaces.",
     persona:
-      "Output: 'health 0.93' header, then 4 lines listing fictional issues with severity ('warn: 12 stale deps', 'err: 3 untyped exports', etc). End with a one-line suggestion.",
+      "Expect a GitHub repo in the prompt (format: <owner>/<repo>). Steps: 1) fetch_url https://api.github.com/repos/<owner>/<repo>/contents/package.json to read package.json (the response is a JSON object with a base64-encoded `content` field — decode the dependencies and devDependencies maps). 2) For each of up to 6 production deps, fetch_url https://registry.npmjs.org/<pkg>/latest to get the latest version. 3) Compare with the version pinned in package.json. Output header 'code-health · <owner>/<repo>'. Then up to 6 lines like '<pkg>  pinned <a> → latest <b>  <stale?>' where stale is 'stale' if minor/major behind, else 'ok'. End with one-line suggestion. If no repo or no package.json, say so in one line.",
   },
   "vuln-scanner": {
     name: "vuln-scanner",
     summary: "Audits dependencies and CI workflows for known vulnerabilities.",
     persona:
-      "Output a fake scan summary: 'scanned 218 deps · 1 high · 4 moderate'. List the high-severity item with a CVE-style ID and a one-line patch suggestion.",
+      "Expect either an npm package name or a GitHub repo in the prompt. If a package name: fetch_url https://api.osv.dev/v1/query with body {\"package\":{\"name\":\"<pkg>\",\"ecosystem\":\"npm\"}} (note: OSV requires POST — instead use GET fetch_url to https://api.osv.dev/v1/vulns?package=<pkg>&ecosystem=npm to look up known IDs). If a GitHub repo: fetch_url https://api.github.com/repos/<owner>/<repo>/vulnerability-alerts (returns 204 if alerts on, 404 if not — note: this requires repo admin perms; if it fails, fall back to package.json scanning). Output header 'vuln-scan · <target>'. List up to 4 advisories: 'GHSA/CVE id · severity · summary'. End with 'Reviewed <n> deps · <high> high · <mod> moderate'. If OSV/GH return nothing, say 'no known advisories found' honestly.",
   },
   "deploy-prototype": {
     name: "deploy-prototype",
     summary: "Spins up a Vercel preview from a description. Returns the URL.",
-    persona:
-      "Output: '» bootstrapping...' lines (3-4 steps), then '✓ deployed' with a fictional preview URL like 'aeon-prototype-xyz.vercel.app'.",
+    comingSoon: true,
+    requires: "Vercel API token — not yet wired.",
   },
   "create-skill": {
     name: "create-skill",
     summary:
       "Generates a new skill from a one-line description and registers it.",
-    persona:
-      "Output: '» drafting skill spec', then a small skill stub block (name, cron, 2-line prompt). End with '✓ registered to ./skills/'.",
+    comingSoon: true,
+    requires:
+      "Skill-creation UI + D1 schema for user-defined skills — not yet wired.",
   },
+
+  // --- crypto ---
 
   "token-alert": {
     name: "token-alert",
     summary: "Watches a list of tokens; pings when momentum or unlocks shift.",
     persona:
-      "Try fetch_url https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=10&page=1&price_change_percentage=24h for real prices. Pick 3-4 movers with the largest 24h % change, output each like '$BTC +3.2% · vol 2.1× · price $67k'. End with a one-line read.",
+      "Call fetch_url on https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=12&page=1&price_change_percentage=24h to get real prices. Pick the 4 movers with the largest absolute 24h % change. Output one line per mover formatted as '<symbol upper> <signed pct>%  vol/mcap=<turnover>x  $<price formatted>'. End with one one-line read (one sentence, no hedging).",
   },
   "on-chain-monitor": {
     name: "on-chain-monitor",
     summary: "Watches wallets, contracts, and flows for material moves.",
-    persona:
-      "Output 3 fake lines like 'wallet 0x7f..a3  moved 412 ETH → cex (binance)' with a one-line read at the end.",
+    comingSoon: true,
+    requires:
+      "Etherscan / Alchemy API key + wallet watchlist — not yet wired.",
   },
   "defi-monitor": {
     name: "defi-monitor",
     summary:
       "TVL, yields, exploits — a continuous read on the DeFi landscape.",
     persona:
-      "Try fetch_url https://api.llama.fi/protocols for real DeFi TVL. Pick 3 movers (biggest TVL change), output one line each. End with one yield-of-the-day fake line and one risk note.",
+      "Call fetch_url on https://api.llama.fi/protocols to get real DeFi TVL. From the response, pick the 3 protocols with the largest absolute change1d (1-day TVL change). Output one line per protocol formatted as '<name>  TVL $<tvl in B/M>  <signed 1d %>%  cat: <category>'. End with one risk/opportunity read (one sentence, grounded in the data).",
   },
   "unlock-monitor": {
     name: "unlock-monitor",
     summary: "Flags token unlocks before they hit, with float context.",
-    persona:
-      "Output 3 upcoming fake unlocks: 'TKN · 1.2M tokens · 4d · 3.4% of float'. End with a one-line risk read.",
+    comingSoon: true,
+    requires: "TokenUnlocks/Cryptorank API (paid tier) — not yet wired.",
   },
   "treasury-info": {
     name: "treasury-info",
     summary: "DAO treasury composition and burn-rate, plus recent movements.",
     persona:
-      "Output: 'treasury $42.1M · 18mo runway' header, 3 composition lines, 1 burn line. End with one strategic note.",
+      "Expect a protocol slug in the prompt (e.g., 'uniswap', 'lido', 'arbitrum'). Call fetch_url on https://api.llama.fi/treasury/<slug>. From the response, summarize total treasury value and the top 3 token holdings by USD value. Output header 'treasury · <protocol> · $<total formatted>'. Then 3 lines '<token>  $<value formatted>  <pct>% of treasury'. End with a one-line composition note. If the slug returns 404, suggest 2-3 slugs the user can try.",
   },
 
-  "twitter-thread": {
-    name: "twitter-thread",
-    summary: "Drafts a thread from a topic in your voice.",
-    persona:
-      "Output 4 numbered tweets ('1/', '2/', etc), each ≤ 240 chars, voice-matched and confident. Skip emoji.",
+  // --- social (all coming soon — no public API for posting without user OAuth) ---
+
+  "write-tweet": {
+    name: "write-tweet",
+    summary: "Drafts tweets in your voice. Threads when the idea deserves it.",
+    comingSoon: true,
+    requires: "X/Twitter API v2 + per-user OAuth — not yet wired.",
+  },
+  "thread-formatter": {
+    name: "thread-formatter",
+    summary: "Turn long-form notes into a readable thread.",
+    comingSoon: true,
+    requires: "Style profile + draft store — not yet wired.",
+  },
+  "reply-maker": {
+    name: "reply-maker",
+    summary:
+      "Suggests replies to mentions and DMs. You approve before sending.",
+    comingSoon: true,
+    requires: "X/Twitter API v2 + per-user OAuth — not yet wired.",
+  },
+  "farcaster-digest": {
+    name: "farcaster-digest",
+    summary: "Pulls the day from the casts you actually care about.",
+    comingSoon: true,
+    requires: "Neynar/Farcaster Hub API key + FID watchlist — not yet wired.",
   },
   "syndicate-article": {
     name: "syndicate-article",
     summary: "Push a new post across Twitter, Farcaster, LinkedIn, blog.",
-    persona:
-      "Output: '» fanning out post `<fake-slug>`'. Then 4 lines, one per platform ('✓ twitter · 1 thread', etc), with one warn line about a quirk.",
-  },
-  "auto-reply": {
-    name: "auto-reply",
-    summary: "Drafts thoughtful replies on your behalf, ranked by signal.",
-    persona:
-      "Output 3 fake mention summaries followed by a one-line draft reply each. End with 'sent: 0 · drafted: 3 · skipped: 7 (low signal)'.",
-  },
-  "campaign-tracker": {
-    name: "campaign-tracker",
-    summary: "Tracks engagement and trend curves for a launched campaign.",
-    persona:
-      "Output 4 fake metrics ('impressions 184k +12%', 'CTR 3.1%', etc), then a one-line read.",
-  },
-  "voice-tune": {
-    name: "voice-tune",
-    summary:
-      "Refines outputs against your STYLE.md, learns from accepts/rejects.",
-    persona:
-      "Output: 3 short diffs of voice corrections (sentence A → sentence B) and a one-line summary like 'drift -0.04 · style match 0.93'.",
+    comingSoon: true,
+    requires: "Per-platform OAuth (X, Farcaster, LinkedIn) — not yet wired.",
   },
 
-  "daily-recap": {
-    name: "daily-recap",
+  // --- productivity (all coming soon — need user data integration) ---
+
+  "daily-routine": {
+    name: "daily-routine",
     summary:
-      "End-of-day digest of what got done, what stalled, and what's next.",
-    persona:
-      "Output: 'shipped:' header with 3 bullets, 'stalled:' with 2 bullets, 'tomorrow:' with 3 bullets. Plain, no emoji.",
+      "Reminds you of your routine without being annoying about it.",
+    comingSoon: true,
+    requires: "User routine schema + push channel — not yet wired.",
+  },
+  "evening-recap": {
+    name: "evening-recap",
+    summary: "What happened today, what shipped, what you owe people.",
+    comingSoon: true,
+    requires:
+      "Activity ingestion (calendar, git, inbox) — not yet wired.",
+  },
+  "goal-tracker": {
+    name: "goal-tracker",
+    summary: "Keeps your goals visible. Nudges when one slips for a week.",
+    comingSoon: true,
+    requires: "Per-user goal store + cron nudges — not yet wired.",
   },
   "weekly-review": {
     name: "weekly-review",
-    summary: "Weekly retrospective: wins, regrets, signals, and pivots.",
-    persona:
-      "Output four sections — wins, regrets, signals, pivots — with 2 bullets each. Tone: dry, honest.",
-  },
-  "goal-coach": {
-    name: "goal-coach",
-    summary: "Tracks weekly OKRs and nudges when something falls behind.",
-    persona:
-      "Output 3 fake goals with progress bars ('███░░ 60%'), one bottleneck note, one nudge.",
+    summary: "Sunday review of the week: shipped, learned, dropped.",
+    comingSoon: true,
+    requires:
+      "Activity ingestion (calendar, git, inbox) — not yet wired.",
   },
   "idea-capture": {
     name: "idea-capture",
-    summary: "Captures shower ideas. Bundles them into themes weekly.",
-    persona:
-      "Output 'this week:' then 4 fake idea-and-theme one-liners. End with 'shipped: 1 · parked: 3'.",
-  },
-  "calendar-brief": {
-    name: "calendar-brief",
-    summary: "Briefs you before each meeting with context and a soft agenda.",
-    persona:
-      "Output: 'next: 14:00 with Lila · 30min'. Then 'context:' 2 lines, 'soft agenda:' 3 bullets. Last line: one-line outcome target.",
+    summary: "Sticky-notes voice notes and Telegram thoughts into memory/.",
+    comingSoon: true,
+    requires: "Telegram/Discord ingestion bot — not yet wired.",
   },
 
+  // --- meta (all coming soon — agent fleet infra not yet built) ---
+
+  heartbeat: {
+    name: "heartbeat",
+    summary:
+      "A signal-of-life ping so you know agents are alive and the wiring works.",
+    comingSoon: true,
+    requires: "Agent fleet metrics pipeline — not yet wired.",
+  },
   "skill-repair": {
     name: "skill-repair",
     summary:
       "When a skill fails, opens an issue, patches the file, and tests the fix.",
-    persona:
-      "Output: '» healing pr-review · last fail 3h ago'. Then 4 step lines (filed issue, patched prompt, ran fixture, verified). End with '✓ green'.",
+    comingSoon: true,
+    requires: "Skill repo write access + CI hook — not yet wired.",
   },
-  heartbeat: {
-    name: "heartbeat",
-    summary: "Daily report on agent fleet health, costs, and skill audits.",
-    persona:
-      "Output: 'fleet 1/1 · uptime 18d' header, 4 stat lines (cost/day, error rate, slowest skill, p95). One-line read at the end.",
+  "skill-evals": {
+    name: "skill-evals",
+    summary:
+      "Scores each skill's output quality. Flags drift before you do.",
+    comingSoon: true,
+    requires: "Eval harness + judge model wiring — not yet wired.",
   },
-  "skill-audit": {
-    name: "skill-audit",
-    summary: "Audits every skill weekly; suggests prompt and contract tweaks.",
-    persona:
-      "Output: '34 skills audited'. List 3 fake findings ('morning-brief: drift on weekends'), then a one-line action.",
+  "self-improve": {
+    name: "self-improve",
+    summary: "Identifies the lowest-leverage skill and proposes a replacement.",
+    comingSoon: true,
+    requires: "Skill usage telemetry + proposal pipeline — not yet wired.",
   },
-  "memory-prune": {
-    name: "memory-prune",
-    summary: "Curates long-term memory: archives noise, promotes signal.",
-    persona:
-      "Output: 'memory · 18.4MB' header, then 3 lines ('archived: 412 lines', 'promoted: 6 facts', 'merged: 3 entities'). End with 'cohesion +0.04'.",
+  "skill-health": {
+    name: "skill-health",
+    summary: "Pass/fail rates, anomalies, recent failures across the fleet.",
+    comingSoon: true,
+    requires: "Run-result store + anomaly detector — not yet wired.",
   },
-  "model-eval": {
-    name: "model-eval",
-    summary: "Periodically benchmarks alternate models for each skill.",
-    persona:
-      "Output: '12 skill-model pairs evaluated'. Then 3 fake results ('morning-brief · sonnet → haiku · q 0.94 · -38% cost'). End with 'auto-applied: 1'.",
-  },
-  "agent-soul": {
-    name: "agent-soul",
-    summary: "Studies your writing and updates SOUL.md / STYLE.md.",
-    persona:
-      "Output 4 fake voice notes ('you've started using semicolons more', etc) and 1 line summary 'STYLE.md updated · 3 edits'.",
+  "fleet-state": {
+    name: "fleet-state",
+    summary: "What other Aeon instances are doing right now.",
+    comingSoon: true,
+    requires: "Federated fleet registry — not yet wired.",
   },
 };
 
@@ -235,12 +257,16 @@ control surface for autonomous AI agents. Your output is rendered in a
 monospace web terminal panel.
 
 You have two real tools:
-- fetch_url(url): Fetch any http/https URL and return up to ~5KB of body text.
+- fetch_url(url): Fetch any http/https URL and return up to ~15KB of body text.
+  For api.github.com requests the worker automatically attaches its
+  GITHUB_API_TOKEN, so authenticated rate limits apply.
 - read_rss(url, limit?): Read an RSS or Atom feed; returns latest items
   with title, link, date, summary.
 
 When real data exists, USE THE TOOLS. Do not fabricate when you can fetch.
-Cite the URL you used.
+Cite the URL or source domain you actually used. Never invent URLs, repo
+names, tickers, prices, CVE ids, or any other concrete identifier — if the
+tool call fails or returns nothing useful, say so in one line and stop.
 
 Style rules (strict):
 - Plain text only. No markdown headers (# or ##). No emoji.
@@ -262,7 +288,7 @@ const TOOLS_SPEC = [
   {
     name: "fetch_url",
     description:
-      "Fetch the contents of an HTTP(S) URL and return the response body (HTML stripped, truncated to ~5KB). Use this for live web content, articles, JSON APIs, search results.",
+      "Fetch the contents of an HTTP(S) URL and return the response body (HTML stripped, truncated to ~15KB). Use this for live web content, articles, JSON APIs, search results. The worker auto-attaches GITHUB_API_TOKEN for api.github.com calls.",
     input_schema: {
       type: "object",
       properties: {
@@ -324,6 +350,31 @@ function json(data, init = {}) {
   });
 }
 
+// Stream a single SSE payload (text + done) to the client. Used for honest
+// "coming soon" replies and other server-known short responses that should
+// render in the existing terminal stream without touching Claude.
+function streamOneShotSse(text) {
+  const encoder = new TextEncoder();
+  const lines = [
+    `data: ${JSON.stringify({ type: "text", delta: text })}\n\n`,
+    `data: ${JSON.stringify({ type: "done", remaining: null })}\n\n`,
+  ];
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const line of lines) controller.enqueue(encoder.encode(line));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      ...CORS,
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+    },
+  });
+}
+
 async function checkRateLimit(ip) {
   if (!ip) return { ok: true, remaining: 30 };
   const cache = caches.default;
@@ -376,7 +427,36 @@ function stripHtml(html) {
     .trim();
 }
 
-async function toolFetchUrl(input) {
+const FETCH_MAX_BYTES = 15000;
+
+function buildToolFetchHeaders(url, env) {
+  const headers = {
+    "user-agent": "AeonTerminal/0.1 (+https://aeonterminal.org)",
+  };
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (host === "api.github.com") {
+      headers.accept = "application/vnd.github+json";
+      headers["x-github-api-version"] = "2022-11-28";
+      if (env?.GITHUB_API_TOKEN) {
+        headers.authorization = `Bearer ${env.GITHUB_API_TOKEN}`;
+      }
+    } else if (
+      host.endsWith("githubusercontent.com") ||
+      host === "raw.githubusercontent.com" ||
+      host === "patch-diff.githubusercontent.com"
+    ) {
+      if (env?.GITHUB_API_TOKEN) {
+        headers.authorization = `Bearer ${env.GITHUB_API_TOKEN}`;
+      }
+    }
+  } catch {
+    // ignore — URL parsing already handled upstream
+  }
+  return headers;
+}
+
+async function toolFetchUrl(input, env) {
   const url = String(input?.url ?? "").trim();
   if (!url) return { content: "error: missing url", isError: true, summary: "no url" };
   if (isUnsafeUrl(url))
@@ -388,7 +468,7 @@ async function toolFetchUrl(input) {
     const res = await fetch(url, {
       signal: ac.signal,
       redirect: "follow",
-      headers: { "user-agent": "AeonTerminal/0.1 (+https://aeonterminal.org)" },
+      headers: buildToolFetchHeaders(url, env),
     });
     clearTimeout(timer);
     const ct = (res.headers.get("content-type") ?? "").toLowerCase();
@@ -397,7 +477,7 @@ async function toolFetchUrl(input) {
     if (ct.includes("text/html") || /<html/i.test(body.slice(0, 200))) {
       body = stripHtml(body);
     }
-    const truncated = body.slice(0, 5000);
+    const truncated = body.slice(0, FETCH_MAX_BYTES);
     return {
       content: `${res.status} ${res.statusText} · ${(originalLen / 1024).toFixed(1)}KB raw\n\n${truncated}`,
       summary: `${(originalLen / 1024).toFixed(1)}KB · ${res.status}`,
@@ -498,8 +578,8 @@ async function toolReadRss(input) {
   }
 }
 
-async function runTool(name, input) {
-  if (name === "fetch_url") return toolFetchUrl(input);
+async function runTool(name, input, env) {
+  if (name === "fetch_url") return toolFetchUrl(input, env);
   if (name === "read_rss") return toolReadRss(input);
   return { content: `unknown tool: ${name}`, isError: true, summary: "unknown tool" };
 }
@@ -619,6 +699,29 @@ async function handleExec(request, env) {
     return json({ error: "unknown_skill" }, { status: 400 });
   }
 
+  // Honest short-circuit for skills that aren't yet wired to a real backend.
+  // We stream a one-shot SSE response so the client's existing run plumbing
+  // (which decodes `data: …` events) renders the message without showing fake
+  // output.
+  if (mode === "run" && SKILL_REGISTRY[skill]?.comingSoon) {
+    const reg = SKILL_REGISTRY[skill];
+    const reason = reg.requires
+      ? `Needs: ${reg.requires}`
+      : "Pipeline scaffolded; integration pending.";
+    const realSlugs = Object.entries(SKILL_REGISTRY)
+      .filter(([, v]) => !v.comingSoon)
+      .map(([k]) => k);
+    const suggestions = realSlugs.slice(0, 5).join(", ");
+    return streamOneShotSse(
+      [
+        `» ${skill} · coming soon`,
+        reason,
+        "",
+        `Try a real skill: ${suggestions}`,
+      ].join("\n"),
+    );
+  }
+
   // Authenticated users get per-user memory + per-plan daily quota.
   // Anonymous users keep the legacy IP-based rate limit and no memory.
   const user = await currentUser(request, env);
@@ -718,7 +821,7 @@ async function handleExec(request, env) {
           if (block.type !== "tool_use") continue;
           const argPreview = previewArgs(block.input);
           await sendText(`\n» ${block.name}${argPreview ? " " + argPreview : ""}\n`);
-          const result = await runTool(block.name, block.input);
+          const result = await runTool(block.name, block.input, env);
           await sendText(`  · ${result.summary}\n`);
           toolResults.push({
             type: "tool_result",

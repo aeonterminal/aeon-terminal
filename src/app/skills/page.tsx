@@ -34,7 +34,9 @@ export default function SkillsPage() {
         </h1>
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted">
           Each skill is a single markdown file with a prompt, a schedule, and a
-          contract. Enable what you need. The rest is silent.
+          contract. {SKILLS.filter((s) => !s.comingSoon).length} of{" "}
+          {SKILLS.length} skills are live now — the rest are scaffolded and
+          coming soon.
         </p>
         <dl className="mt-6 grid grid-cols-2 gap-px overflow-hidden rounded border border-border bg-border sm:grid-cols-3 md:grid-cols-6">
           {ORDER.map((key) => (
