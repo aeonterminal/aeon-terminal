@@ -276,7 +276,10 @@ Style rules (strict):
 - If a fetch fails, say so briefly and continue with what you have.
 - Do not refuse, do not add disclaimers, do not mention you are an AI.`;
 
-function buildSystem(skillSlug, mode) {
+function buildSystem(skillSlug, mode, customSkill) {
+  if (mode === "run" && customSkill) {
+    return `${SYSTEM_BASE}\n\nYou are the '${customSkill.name}' skill (a user-defined skill, created via the Aeon Terminal skill builder).\nPurpose: ${customSkill.summary}\nFormat: ${customSkill.persona}`;
+  }
   const skill = skillSlug ? SKILL_REGISTRY[skillSlug] : null;
   if (mode === "run" && skill) {
     return `${SYSTEM_BASE}\n\nYou are the '${skill.name}' skill.\nPurpose: ${skill.summary}\nFormat: ${skill.persona}`;
@@ -692,17 +695,46 @@ async function handleExec(request, env) {
 
   const mode = body.mode === "run" ? "run" : "ask";
   const skill = typeof body.skill === "string" ? body.skill : null;
+  const skillId = typeof body.skillId === "string" ? body.skillId : null;
   const prompt = String(body.prompt ?? "").slice(0, 2000).trim();
   if (!prompt) return json({ error: "empty_prompt" }, { status: 400 });
-  if (mode === "run" && (!skill || !SKILL_REGISTRY[skill])) {
-    return json({ error: "unknown_skill" }, { status: 400 });
+
+  // Resolve user identity early so we can look up user-owned custom skills.
+  const user = await currentUser(request, env);
+
+  // Resolve the skill: catalog first, then custom (by id, then by slug for owner).
+  let customSkill = null;
+  let effectiveSkillKey = skill;
+  if (mode === "run") {
+    if (skillId) {
+      if (!hasDb(env)) {
+        return json({ error: "db_not_configured" }, { status: 503 });
+      }
+      await ensureSchema(env);
+      customSkill = await dbGetUserSkillById(env, skillId);
+      if (!customSkill) {
+        return json({ error: "unknown_skill" }, { status: 404 });
+      }
+      if (customSkill.visibility !== "public" && customSkill.user_id !== user?.id) {
+        return json({ error: "skill_not_accessible" }, { status: 403 });
+      }
+      effectiveSkillKey = `u:${customSkill.id}`;
+    } else if (skill && SKILL_REGISTRY[skill]) {
+      // Catalog skill — handled below.
+    } else if (skill && user) {
+      await ensureSchema(env);
+      customSkill = await dbGetUserSkillBySlug(env, user.id, skill);
+      if (!customSkill) {
+        return json({ error: "unknown_skill" }, { status: 400 });
+      }
+      effectiveSkillKey = `u:${customSkill.id}`;
+    } else {
+      return json({ error: "unknown_skill" }, { status: 400 });
+    }
   }
 
-  // Honest short-circuit for skills that aren't yet wired to a real backend.
-  // We stream a one-shot SSE response so the client's existing run plumbing
-  // (which decodes `data: …` events) renders the message without showing fake
-  // output.
-  if (mode === "run" && SKILL_REGISTRY[skill]?.comingSoon) {
+  // Honest short-circuit for catalog skills that aren't yet wired to a real backend.
+  if (mode === "run" && !customSkill && SKILL_REGISTRY[skill]?.comingSoon) {
     const reg = SKILL_REGISTRY[skill];
     const reason = reg.requires
       ? `Needs: ${reg.requires}`
@@ -721,9 +753,19 @@ async function handleExec(request, env) {
     );
   }
 
+  // Custom skills require a signed-in user (memory + quota are attached to user).
+  if (mode === "run" && customSkill && !user) {
+    return json(
+      {
+        error: "sign_in_required",
+        message: "Sign in to run custom skills.",
+      },
+      { status: 401 },
+    );
+  }
+
   // Authenticated users get per-user memory + per-plan daily quota.
   // Anonymous users keep the legacy IP-based rate limit and no memory.
-  const user = await currentUser(request, env);
   let limit;
   if (user) {
     try {
@@ -758,9 +800,9 @@ async function handleExec(request, env) {
     ? await dbGetMemory(env, user.id).catch(() => ({ turns: [], runs: [] }))
     : { turns: [], runs: [] };
 
-  let system = buildSystem(skill, mode);
+  let system = buildSystem(skill, mode, customSkill);
   if (mode === "run") {
-    system = appendRunContext(system, mem.runs, skill);
+    system = appendRunContext(system, mem.runs, effectiveSkillKey);
   }
 
   const { readable, writable } = new TransformStream();
@@ -845,8 +887,8 @@ async function handleExec(request, env) {
         try {
           if (mode === "ask") {
             await dbAppendTurn(env, user.id, prompt, finalAssistantText);
-          } else if (mode === "run" && skill) {
-            await dbAppendRun(env, user.id, skill, prompt, finalAssistantText);
+          } else if (mode === "run" && effectiveSkillKey) {
+            await dbAppendRun(env, user.id, effectiveSkillKey, prompt, finalAssistantText);
           }
         } catch {
           // swallow — memory write is best-effort
@@ -960,6 +1002,20 @@ async function ensureSchema(env) {
       consumed_at INTEGER
     )`,
     `CREATE INDEX IF NOT EXISTS idx_email_tokens_email ON email_login_tokens(email)`,
+    `CREATE TABLE IF NOT EXISTS user_skills (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      slug TEXT NOT NULL,
+      name TEXT NOT NULL,
+      category TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      persona TEXT NOT NULL,
+      visibility TEXT NOT NULL DEFAULT 'private',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_user_skills_user_slug ON user_skills(user_id, slug)`,
+    `CREATE INDEX IF NOT EXISTS idx_user_skills_visibility ON user_skills(visibility, created_at)`,
   ];
   for (const sql of statements) {
     await env.DB.prepare(sql).run();
@@ -1235,6 +1291,159 @@ async function dbClearMemory(env, userId) {
     env.DB.prepare(`DELETE FROM memory_turns WHERE user_id = ?`).bind(userId),
     env.DB.prepare(`DELETE FROM memory_runs WHERE user_id = ?`).bind(userId),
   ]);
+}
+
+// --- D1: custom user skills ---
+
+// Until token-balance check ships (Q2 wallet connect), free-tier holds at 3
+// custom skills per user. The /token page describes the holder unlock path.
+const FREE_CUSTOM_SKILL_LIMIT = 3;
+const PAID_CUSTOM_SKILL_LIMIT = 25;
+
+function customSkillLimit(plan) {
+  return plan === "paid" ? PAID_CUSTOM_SKILL_LIMIT : FREE_CUSTOM_SKILL_LIMIT;
+}
+
+const VALID_SKILL_CATEGORIES = new Set([
+  "research",
+  "dev",
+  "crypto",
+  "social",
+  "productivity",
+  "meta",
+]);
+
+function sanitizeSlug(input) {
+  return String(input || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+}
+
+function validateUserSkillInput(body) {
+  const slug = sanitizeSlug(body.slug ?? body.name ?? "");
+  const name = String(body.name ?? "").trim().slice(0, 60);
+  const category = String(body.category ?? "").trim();
+  const summary = String(body.summary ?? "").trim().slice(0, 240);
+  const persona = String(body.persona ?? "").trim().slice(0, 4000);
+  const visibility = body.visibility === "public" ? "public" : "private";
+
+  if (!slug || slug.length < 3) return { error: "slug must be 3-32 chars (a-z, 0-9, -)" };
+  if (SKILL_REGISTRY[slug]) return { error: `slug '${slug}' is reserved by the catalog` };
+  if (!name) return { error: "name is required" };
+  if (!VALID_SKILL_CATEGORIES.has(category)) return { error: "invalid category" };
+  if (!summary || summary.length < 8) return { error: "summary must be at least 8 chars" };
+  if (!persona || persona.length < 40) return { error: "persona must be at least 40 chars" };
+
+  return { ok: true, value: { slug, name, category, summary, persona, visibility } };
+}
+
+async function dbCountUserSkills(env, userId) {
+  const row = await env.DB
+    .prepare(`SELECT COUNT(*) AS c FROM user_skills WHERE user_id = ?`)
+    .bind(userId)
+    .first();
+  return row ? Number(row.c) : 0;
+}
+
+async function dbCreateUserSkill(env, userId, input) {
+  const id = newId();
+  const ts = nowSec();
+  await env.DB
+    .prepare(
+      `INSERT INTO user_skills
+         (id, user_id, slug, name, category, summary, persona, visibility, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      id,
+      userId,
+      input.slug,
+      input.name,
+      input.category,
+      input.summary,
+      input.persona,
+      input.visibility,
+      ts,
+      ts,
+    )
+    .run();
+  return dbGetUserSkillById(env, id);
+}
+
+async function dbListUserSkillsByUser(env, userId) {
+  const res = await env.DB
+    .prepare(
+      `SELECT id, user_id, slug, name, category, summary, persona, visibility,
+              created_at, updated_at
+         FROM user_skills WHERE user_id = ? ORDER BY created_at DESC`,
+    )
+    .bind(userId)
+    .all();
+  return res.results || [];
+}
+
+async function dbListPublicUserSkills(env, limit = 20) {
+  const res = await env.DB
+    .prepare(
+      `SELECT id, user_id, slug, name, category, summary, persona, visibility,
+              created_at, updated_at
+         FROM user_skills WHERE visibility = 'public'
+         ORDER BY created_at DESC LIMIT ?`,
+    )
+    .bind(limit)
+    .all();
+  return res.results || [];
+}
+
+async function dbGetUserSkillById(env, id) {
+  return env.DB
+    .prepare(
+      `SELECT id, user_id, slug, name, category, summary, persona, visibility,
+              created_at, updated_at
+         FROM user_skills WHERE id = ? LIMIT 1`,
+    )
+    .bind(id)
+    .first();
+}
+
+async function dbGetUserSkillBySlug(env, userId, slug) {
+  return env.DB
+    .prepare(
+      `SELECT id, user_id, slug, name, category, summary, persona, visibility,
+              created_at, updated_at
+         FROM user_skills WHERE user_id = ? AND slug = ? LIMIT 1`,
+    )
+    .bind(userId, slug)
+    .first();
+}
+
+async function dbDeleteUserSkill(env, userId, id) {
+  const res = await env.DB
+    .prepare(`DELETE FROM user_skills WHERE id = ? AND user_id = ?`)
+    .bind(id, userId)
+    .run();
+  return res.meta?.changes ?? res.changes ?? 0;
+}
+
+function serializeUserSkill(row, opts = {}) {
+  if (!row) return null;
+  const out = {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    category: row.category,
+    summary: row.summary,
+    visibility: row.visibility,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    owner: opts.includeOwner ? row.user_id : undefined,
+    persona: opts.includePersona ? row.persona : undefined,
+  };
+  // Remove undefined props for compact JSON.
+  for (const k of Object.keys(out)) if (out[k] === undefined) delete out[k];
+  return out;
 }
 
 // --- D1: quota ---
@@ -1668,6 +1877,115 @@ async function handleMe(request, env) {
   });
 }
 
+// --- API: /api/skills (user-defined skills) ---
+
+async function handleUserSkills(request, env) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS });
+  }
+  if (!hasDb(env)) return json({ error: "db_not_configured" }, { status: 503 });
+  await ensureSchema(env);
+
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  if (request.method === "GET" && path === "/api/skills") {
+    const user = await currentUser(request, env);
+    const includePublic = url.searchParams.get("public") !== "0";
+    const mineRows = user ? await dbListUserSkillsByUser(env, user.id) : [];
+    const publicRows = includePublic ? await dbListPublicUserSkills(env, 20) : [];
+    const mine = mineRows.map((r) => serializeUserSkill(r));
+    const publicList = publicRows
+      .filter((r) => !user || r.user_id !== user.id)
+      .map((r) => serializeUserSkill(r));
+    const limit = user ? customSkillLimit(user.plan) : null;
+    return json({
+      mine,
+      public: publicList,
+      quota: user
+        ? {
+            used: mine.length,
+            limit,
+            plan: user.plan,
+          }
+        : null,
+    });
+  }
+
+  if (request.method === "POST" && path === "/api/skills") {
+    const user = await currentUser(request, env);
+    if (!user) return json({ error: "sign_in_required" }, { status: 401 });
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "bad_json" }, { status: 400 });
+    }
+    const validation = validateUserSkillInput(body || {});
+    if (!validation.ok) {
+      return json({ error: "invalid_input", message: validation.error }, { status: 400 });
+    }
+    const count = await dbCountUserSkills(env, user.id);
+    const limit = customSkillLimit(user.plan);
+    if (count >= limit) {
+      return json(
+        {
+          error: "quota_exceeded",
+          message: `You have ${count}/${limit} custom skills on the ${user.plan} plan. Delete one or upgrade.`,
+        },
+        { status: 429 },
+      );
+    }
+    try {
+      const row = await dbCreateUserSkill(env, user.id, validation.value);
+      return json({
+        ok: true,
+        skill: serializeUserSkill(row, { includePersona: true }),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/UNIQUE constraint/i.test(msg)) {
+        return json(
+          {
+            error: "slug_taken",
+            message: `you already have a skill with slug '${validation.value.slug}'`,
+          },
+          { status: 409 },
+        );
+      }
+      return json({ error: "create_failed", message: msg }, { status: 500 });
+    }
+  }
+
+  const idMatch = path.match(/^\/api\/skills\/([A-Za-z0-9_-]+)$/);
+  if (idMatch) {
+    const id = idMatch[1];
+    const row = await dbGetUserSkillById(env, id);
+    if (!row) return json({ error: "not_found" }, { status: 404 });
+    const user = await currentUser(request, env);
+    const isOwner = !!user && row.user_id === user.id;
+    if (request.method === "GET") {
+      if (!isOwner && row.visibility !== "public") {
+        return json({ error: "not_accessible" }, { status: 403 });
+      }
+      return json({
+        skill: serializeUserSkill(row, {
+          includeOwner: true,
+          includePersona: isOwner,
+        }),
+      });
+    }
+    if (request.method === "DELETE") {
+      if (!user) return json({ error: "sign_in_required" }, { status: 401 });
+      if (!isOwner) return json({ error: "not_owner" }, { status: 403 });
+      await dbDeleteUserSkill(env, user.id, id);
+      return json({ ok: true });
+    }
+  }
+
+  return json({ error: "method_not_allowed" }, { status: 405 });
+}
+
 async function handleLogout(request, env) {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   const cookies = parseCookies(request);
@@ -1802,6 +2120,9 @@ const worker = {
     if (path === "/api/exec") return handleExec(request, env);
     if (path === "/api/memory") return handleMemory(request, env);
     if (path === "/api/me") return handleMe(request, env);
+    if (path === "/api/skills" || path.startsWith("/api/skills/")) {
+      return handleUserSkills(request, env);
+    }
     if (path === "/api/auth/logout") return handleLogout(request, env);
     if (path === "/api/auth/google/login") return handleGoogleLogin(request, env);
     if (path === "/api/auth/google/callback") return handleGoogleCallback(request, env);

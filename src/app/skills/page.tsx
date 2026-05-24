@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { SkillCard } from "@/components/skill-card";
+import { CommunitySkills } from "@/components/community-skills";
 import {
   CATEGORIES,
   SKILLS,
@@ -54,7 +56,33 @@ export default function SkillsPage() {
             </a>
           ))}
         </dl>
+
+        <div className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-accent/30 bg-accent/[0.05] px-4 py-3">
+          <span className="text-[11px] uppercase tracking-[0.25em] text-accent">
+            new · build your own
+          </span>
+          <p className="flex-1 text-xs leading-relaxed text-muted sm:text-sm">
+            Design a Claude persona, name it, and run it from the terminal.
+            Public ones are shareable as a link.
+          </p>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              href="/skills/create"
+              className="rounded border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-accent hover:bg-accent/20"
+            >
+              + create skill
+            </Link>
+            <Link
+              href="/skills/mine"
+              className="rounded border border-border bg-surface px-3 py-1.5 text-xs text-muted hover:border-border-strong hover:text-foreground"
+            >
+              ~/skills
+            </Link>
+          </div>
+        </div>
       </div>
+
+      <CommunitySkills />
 
       <div className="space-y-14">
         {ORDER.map((key) => {

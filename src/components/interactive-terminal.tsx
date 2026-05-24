@@ -25,6 +25,15 @@ type AuthUser = {
   plan: string;
 };
 
+type CustomSkill = {
+  id: string;
+  slug: string;
+  name: string;
+  summary: string;
+  category: string;
+  visibility: "private" | "public";
+};
+
 type Usage = {
   day: string;
   asks: number;
@@ -38,6 +47,7 @@ const HELP = `Available commands:
   login                      — open the sign-in page
   signout                    — end this session
   skills [category]          — list skills (filter by category)
+  skills --mine              — list your custom skills (signed-in only)
   cat <skill>                — show a skill spec
   run <skill> [prompt...]    — execute a skill via Claude (real LLM)
   run <skill> --mock         — execute a skill with mock output (offline)
@@ -79,6 +89,7 @@ export function InteractiveTerminal() {
   const [streaming, setStreaming] = useState(false);
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [usage, setUsage] = useState<Usage | null>(null);
+  const [customSkills, setCustomSkills] = useState<CustomSkill[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -122,11 +133,46 @@ export function InteractiveTerminal() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function loadSkills() {
+      if (!authUser) {
+        if (!cancelled) setCustomSkills([]);
+        return;
+      }
+      try {
+        const res = await fetch("/api/skills?public=0", {
+          credentials: "include",
+        });
+        if (cancelled) return;
+        if (!res.ok) {
+          setCustomSkills([]);
+          return;
+        }
+        const data = (await res.json()) as { mine: CustomSkill[] };
+        if (cancelled) return;
+        setCustomSkills(data.mine ?? []);
+      } catch {
+        // ignore
+      }
+    }
+    void loadSkills();
+    return () => {
+      cancelled = true;
+    };
+  }, [authUser]);
+
   const skillBySlug = useMemo(() => {
     const m = new Map<string, Skill>();
     for (const s of SKILLS) m.set(s.slug, s);
     return m;
   }, []);
+
+  const customBySlug = useMemo(() => {
+    const m = new Map<string, CustomSkill>();
+    for (const s of customSkills) m.set(s.slug, s);
+    return m;
+  }, [customSkills]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({
@@ -402,6 +448,25 @@ export function InteractiveTerminal() {
         }
         case "skills": {
           const filter = rest[0];
+          if (filter === "--mine" || filter === "mine") {
+            if (!authUser) {
+              print("sign in first ('login') to see your custom skills.", "warn");
+              return;
+            }
+            if (customSkills.length === 0) {
+              print("no custom skills yet.", "muted");
+              print("build one: /skills/create", "muted");
+              return;
+            }
+            for (const s of customSkills) {
+              print(
+                `● ${pad(s.name, 26)}  ${pad(s.category, 12)}  ${pad(s.visibility, 10)}  ${s.summary}`,
+                "ok",
+              );
+            }
+            print(`\n${customSkills.length} custom skill(s)`, "muted");
+            return;
+          }
           const rows = SKILLS.filter((s) => !filter || s.category === filter);
           if (!rows.length) {
             print(`no skills match '${filter}'`, "warn");
@@ -420,6 +485,12 @@ export function InteractiveTerminal() {
             `\n${rows.length} skill(s) · ${rows.filter((r) => enabled.has(r.slug)).length} enabled`,
             "muted",
           );
+          if (authUser && customSkills.length > 0) {
+            print(
+              `tip: 'skills --mine' to see your ${customSkills.length} custom skill(s)`,
+              "muted",
+            );
+          }
           return;
         }
         case "cat": {
@@ -444,13 +515,20 @@ export function InteractiveTerminal() {
         case "run": {
           const slug = rest[0];
           const mock = rest.includes("--mock") || rest.includes("--dry");
-          const s = slug ? skillBySlug.get(slug) : undefined;
-          if (!s) {
+          const catalog = slug ? skillBySlug.get(slug) : undefined;
+          const custom = slug ? customBySlug.get(slug) : undefined;
+          if (!catalog && !custom) {
             print(`skill not found: ${slug ?? "<none>"}`, "err");
+            if (slug && authUser) {
+              print(
+                `tip: 'skills' lists catalog · 'skills --mine' lists your custom skills`,
+                "muted",
+              );
+            }
             return;
           }
-          if (mock) {
-            print(`» run ${s.name} (mock)`, "info");
+          if (mock && catalog) {
+            print(`» run ${catalog.name} (mock)`, "info");
             print(`  · loaded soul · matched voice 0.${rand(88, 99)}`, "muted");
             print(`  · fetched context (${rand(3, 14)} sources)`, "muted");
             print(
@@ -458,17 +536,19 @@ export function InteractiveTerminal() {
               "muted",
             );
             print(
-              `✓ mock complete · output in .outputs/${s.slug}.md`,
+              `✓ mock complete · output in .outputs/${catalog.slug}.md`,
               "ok",
             );
             return;
           }
+          const name = catalog?.name ?? custom!.name;
+          const useSlug = catalog?.slug ?? custom!.slug;
           const extra = rest.slice(1).filter((t) => !t.startsWith("--")).join(" ").trim();
           const userPrompt = extra
-            ? `Execute the ${s.name} skill with this additional context: ${extra}`
-            : `Execute the ${s.name} skill now.`;
-          print(`» run ${s.name}`, "info");
-          void runStream("run", s.slug, userPrompt);
+            ? `Execute the ${name} skill with this additional context: ${extra}`
+            : `Execute the ${name} skill now.`;
+          print(`» run ${name}${custom ? " · custom" : ""}`, "info");
+          void runStream("run", useSlug, userPrompt);
           return;
         }
         case "ask": {
@@ -558,6 +638,8 @@ export function InteractiveTerminal() {
       authUser,
       clearMemory,
       enabled,
+      customBySlug,
+      customSkills,
       fetchMemory,
       print,
       printCmd,
