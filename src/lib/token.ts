@@ -28,6 +28,16 @@ export interface TokenUtility {
 
 export const UTILITIES: readonly TokenUtility[] = [
   {
+    slug: "custom-skills",
+    title: "Build your own skill",
+    summary:
+      "Name a Claude persona, run it from the terminal, share it as a link.",
+    detail:
+      "Custom skills are live for every signed-in user (3 per account on the free tier). Once wallet-connect ships, $aeonterminal holders get a higher cap (25+) and access to skill templates that require higher-cost models.",
+    status: "live",
+    blockedBy: "Wallet-connect for holder cap unlock — Q2",
+  },
+  {
     slug: "quota-unlock",
     title: "Hold to unlock paid quota",
     summary: "200 asks + 50 skill runs / day, free for $aeonterminal holders.",

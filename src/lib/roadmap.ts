@@ -40,6 +40,11 @@ export const ROADMAP: readonly RoadmapPhase[] = [
         label: "$aeonterminal token launch",
         detail: "ca live on base via virtuals · banner + footer + /token page",
       },
+      {
+        label: "custom skill creator",
+        detail:
+          "build your own claude persona · name it, run it, share it · 3 per free account",
+      },
     ],
   },
   {
