@@ -70,7 +70,8 @@ export const ROADMAP: readonly RoadmapPhase[] = [
     items: [
       {
         label: "stripe billing",
-        detail: "paid plan · checkout + portal · alternative to wallet-tier",
+        detail:
+          "checkout + portal + webhook handlers shipped · routes return 503 stripe_not_configured until secrets land · same quota as holder unlock",
       },
       {
         label: "scheduled skill runs",

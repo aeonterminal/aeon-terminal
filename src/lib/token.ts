@@ -64,6 +64,16 @@ export const UTILITIES: readonly TokenUtility[] = [
     status: "live",
   },
   {
+    slug: "stripe-billing",
+    title: "Paid plan via Stripe",
+    summary:
+      "Card checkout + customer portal — alternative paid path for non-holders. Same quota as the holder unlock.",
+    detail:
+      "Stripe Checkout + Customer Portal wired into /account. Real webhook listener updates plan state from Stripe events (no polling). Holders still get paid quota free via the wallet path — Stripe is the card-payment alternative. Live when STRIPE_SECRET_KEY + STRIPE_PRICE_ID + STRIPE_WEBHOOK_SECRET land in the Worker config; the route paths return 503 stripe_not_configured until then.",
+    status: "next",
+    blockedBy: "Stripe account + price id + webhook secret",
+  },
+  {
     slug: "skill-vote",
     title: "Prioritisation vote",
     summary:

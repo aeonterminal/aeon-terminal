@@ -27,6 +27,19 @@ type MeResponse = {
   tier: TierInfo | null;
 };
 
+type Subscription = {
+  status: string;
+  plan: "free" | "paid";
+  current_period_end: number | null;
+  cancel_at_period_end: boolean;
+  has_payment_method: boolean;
+};
+
+type BillingMe = {
+  configured: boolean;
+  subscription: Subscription | null;
+};
+
 type LoadState =
   | { kind: "loading" }
   | { kind: "anon" }
@@ -72,9 +85,10 @@ function formatRelative(ts: number): string {
 
 export function AccountClient() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
-  const [busy, setBusy] = useState<null | "connect" | "refresh" | "disconnect">(
-    null,
-  );
+  const [billing, setBilling] = useState<BillingMe | null>(null);
+  const [busy, setBusy] = useState<
+    null | "connect" | "refresh" | "disconnect" | "checkout" | "portal"
+  >(null);
   const [flash, setFlash] = useState<{
     kind: "ok" | "err";
     message: string;
@@ -83,6 +97,32 @@ export function AccountClient() {
   useEffect(() => {
     let cancelled = false;
     async function load() {
+      // Pull the post-checkout banner out of the URL first so the flash sets
+      // before the slower /api/me fetch resolves. Strip the query so a
+      // refresh doesn't keep re-flashing.
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(window.location.search);
+        const billingParam = params.get("billing");
+        if (billingParam === "success") {
+          if (!cancelled) {
+            setFlash({
+              kind: "ok",
+              message: "checkout complete — plan updates within a few seconds.",
+            });
+          }
+          const u = new URL(window.location.href);
+          u.searchParams.delete("billing");
+          u.searchParams.delete("session_id");
+          window.history.replaceState({}, "", u.toString());
+        } else if (billingParam === "cancel") {
+          if (!cancelled) {
+            setFlash({ kind: "err", message: "checkout cancelled." });
+          }
+          const u = new URL(window.location.href);
+          u.searchParams.delete("billing");
+          window.history.replaceState({}, "", u.toString());
+        }
+      }
       try {
         const res = await fetch("/api/me", { credentials: "include" });
         if (cancelled) return;
@@ -106,9 +146,16 @@ export function AccountClient() {
               wallet: null,
             },
           });
-          return;
+        } else {
+          setState({ kind: "ok", tier: data.tier });
         }
-        setState({ kind: "ok", tier: data.tier });
+        // Billing state is independent; ignore failures so the page still
+        // works when Stripe isn't configured.
+        const bRes = await fetch("/api/billing/me", { credentials: "include" });
+        if (cancelled) return;
+        if (bRes.ok) {
+          setBilling((await bRes.json()) as BillingMe);
+        }
       } catch (err) {
         if (cancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
@@ -120,6 +167,56 @@ export function AccountClient() {
       cancelled = true;
     };
   }, []);
+
+  const upgradeCheckout = useCallback(async () => {
+    if (busy) return;
+    setBusy("checkout");
+    setFlash(null);
+    try {
+      const res = await fetch("/api/billing/checkout", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ success_path: "/account", cancel_path: "/account" }),
+      });
+      const j = (await res.json()) as { url?: string; error?: string; message?: string };
+      if (!res.ok || !j.url) {
+        throw new Error(j.message || j.error || `checkout_failed_${res.status}`);
+      }
+      window.location.href = j.url;
+    } catch (err) {
+      setFlash({
+        kind: "err",
+        message: err instanceof Error ? err.message : String(err),
+      });
+      setBusy(null);
+    }
+  }, [busy]);
+
+  const openPortal = useCallback(async () => {
+    if (busy) return;
+    setBusy("portal");
+    setFlash(null);
+    try {
+      const res = await fetch("/api/billing/portal", {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ return_path: "/account" }),
+      });
+      const j = (await res.json()) as { url?: string; error?: string; message?: string };
+      if (!res.ok || !j.url) {
+        throw new Error(j.message || j.error || `portal_failed_${res.status}`);
+      }
+      window.location.href = j.url;
+    } catch (err) {
+      setFlash({
+        kind: "err",
+        message: err instanceof Error ? err.message : String(err),
+      });
+      setBusy(null);
+    }
+  }, [busy]);
 
   const connect = useCallback(async () => {
     const ethereum = getEthereum();
@@ -359,6 +456,14 @@ export function AccountClient() {
         </div>
       </section>
 
+      <SubscriptionSection
+        billing={billing}
+        tier={tier}
+        busy={busy}
+        onCheckout={upgradeCheckout}
+        onPortal={openPortal}
+      />
+
       <section className="rounded border border-border bg-surface/80 p-5 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-[11px] uppercase tracking-[0.3em] text-muted">
@@ -551,5 +656,181 @@ export function AccountClient() {
         </ul>
       </section>
     </div>
+  );
+}
+
+function formatPeriodEnd(ts: number | null): string {
+  if (!ts) return "—";
+  try {
+    return new Date(ts * 1000).toISOString().slice(0, 10);
+  } catch {
+    return "—";
+  }
+}
+
+function subscriptionLabel(status: string): { text: string; tone: "ok" | "warn" | "off" } {
+  switch (status) {
+    case "active":
+    case "trialing":
+      return { text: status, tone: "ok" };
+    case "past_due":
+      return { text: "past due", tone: "warn" };
+    case "unpaid":
+    case "incomplete":
+    case "incomplete_expired":
+      return { text: status.replace("_", " "), tone: "warn" };
+    case "canceled":
+    case "paused":
+      return { text: status, tone: "off" };
+    default:
+      return { text: status || "unknown", tone: "off" };
+  }
+}
+
+type SubscriptionSectionProps = {
+  billing: BillingMe | null;
+  tier: TierInfo;
+  busy: null | "connect" | "refresh" | "disconnect" | "checkout" | "portal";
+  onCheckout: () => void;
+  onPortal: () => void;
+};
+
+function SubscriptionSection({
+  billing,
+  tier,
+  busy,
+  onCheckout,
+  onPortal,
+}: SubscriptionSectionProps) {
+  // Three modes: configured-no-sub (show upgrade button), configured-with-sub
+  // (show details + portal), and not-configured (honest 'wiring pending').
+  const sub = billing?.subscription ?? null;
+  const isActive = !!sub && (sub.status === "active" || sub.status === "trialing");
+  const isHolder = tier.tier === "paid" && tier.source === "holder";
+
+  return (
+    <section className="rounded border border-border bg-surface/80 p-5 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-[11px] uppercase tracking-[0.3em] text-muted">
+          $ subscription --status
+        </p>
+        <p className="text-[11px] text-muted-2">
+          billing via{" "}
+          <a
+            href="https://stripe.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-foreground hover:text-accent"
+          >
+            stripe
+          </a>
+        </p>
+      </div>
+
+      {billing && billing.configured && isActive && sub ? (
+        <div className="mt-4 space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded border border-accent/40 bg-accent/10 px-4 py-3">
+              <p className="text-[10px] uppercase tracking-widest text-muted-2">
+                plan
+              </p>
+              <p className="mt-1 font-mono text-lg text-accent">
+                $ paid
+              </p>
+              <p className="mt-1 text-[11px] text-muted">
+                200 asks · 50 runs · 25 custom skills per day
+              </p>
+            </div>
+            <div className="rounded border border-border bg-surface px-4 py-3">
+              <p className="text-[10px] uppercase tracking-widest text-muted-2">
+                next renewal
+              </p>
+              <p className="mt-1 font-mono text-lg text-foreground">
+                {formatPeriodEnd(sub.current_period_end)}
+              </p>
+              <p className="mt-1 text-[11px] text-muted">
+                status:{" "}
+                <span className="text-foreground">
+                  {subscriptionLabel(sub.status).text}
+                </span>
+                {sub.cancel_at_period_end ? " · cancels at period end" : ""}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={onPortal}
+              disabled={busy !== null}
+              className="rounded border border-accent bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 disabled:opacity-50"
+            >
+              {busy === "portal" ? "opening portal…" : "→ manage subscription"}
+            </button>
+            <p className="text-[11px] text-muted">
+              cancel · change card · view invoices via Stripe Customer Portal
+            </p>
+          </div>
+        </div>
+      ) : billing && billing.configured ? (
+        <div className="mt-4 space-y-4">
+          <p className="text-sm text-foreground">
+            No active subscription. Pay by card to unlock paid quota — or hold
+            ${TOKEN.symbol} to get the same quota free.
+          </p>
+          <ul className="space-y-1 text-xs leading-relaxed text-muted">
+            <li>
+              <span className="text-foreground">paid plan ·</span> 200 asks +
+              50 skill runs per day · 25 custom skills · billed monthly
+            </li>
+            <li>
+              <span className="text-foreground">holder unlock ·</span> same
+              quota, free, no card · hold the holder threshold in ${TOKEN.symbol}
+            </li>
+            <li>
+              <span className="text-foreground">cancel anytime ·</span> Stripe
+              Customer Portal handles cancel + card update + invoices
+            </li>
+          </ul>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <button
+              type="button"
+              onClick={onCheckout}
+              disabled={busy !== null || isHolder}
+              className="rounded border border-accent bg-accent/10 px-4 py-2 text-sm text-accent hover:bg-accent/20 disabled:opacity-50"
+              title={isHolder ? "you already get paid quota via the holder unlock" : undefined}
+            >
+              {busy === "checkout" ? "opening checkout…" : "→ upgrade plan"}
+            </button>
+            {isHolder ? (
+              <p className="text-[11px] text-accent-2">
+                you already have paid quota via the holder unlock — no need to
+                pay.
+              </p>
+            ) : (
+              <p className="text-[11px] text-muted">
+                opens stripe checkout · price shown there · no charge until
+                confirmed
+              </p>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-4 space-y-3">
+          <p className="text-sm text-foreground">
+            Card billing pending — Stripe keys haven&apos;t landed in the
+            worker config yet.
+          </p>
+          <p className="text-xs leading-relaxed text-muted">
+            Routes (<code className="text-foreground">/api/billing/checkout</code>,{" "}
+            <code className="text-foreground">/api/billing/portal</code>,{" "}
+            <code className="text-foreground">/api/billing/webhook</code>) are
+            wired and return{" "}
+            <code className="text-foreground">503 stripe_not_configured</code>{" "}
+            until the secrets ship. Until then, holders get paid quota free via
+            the wallet card below — no card needed.
+          </p>
+        </div>
+      )}
+    </section>
   );
 }

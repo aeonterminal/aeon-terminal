@@ -1098,6 +1098,26 @@ async function ensureSchema(env) {
       expires_at INTEGER NOT NULL,
       consumed_at INTEGER
     )`,
+    // Stripe subscription state per user. One row per user (a user can hold
+    // at most one active subscription on aeon.terminal). Source of truth is
+    // Stripe; webhook keeps this in sync, and we mirror the effective plan
+    // onto users.plan so downstream readers don't need a second lookup.
+    //
+    // status: stripe subscription status verbatim
+    //   ('active' | 'trialing' | 'past_due' | 'canceled' | 'incomplete' |
+    //    'incomplete_expired' | 'unpaid' | 'paused')
+    // plan: derived ('paid' when active/trialing, otherwise 'free')
+    `CREATE TABLE IF NOT EXISTS user_subscriptions (
+      user_id TEXT PRIMARY KEY,
+      stripe_customer_id TEXT NOT NULL,
+      stripe_subscription_id TEXT,
+      status TEXT NOT NULL,
+      plan TEXT NOT NULL DEFAULT 'free',
+      current_period_end INTEGER,
+      cancel_at_period_end INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_user_subs_customer ON user_subscriptions(stripe_customer_id)`,
   ];
   for (const sql of statements) {
     await env.DB.prepare(sql).run();
@@ -2081,6 +2101,405 @@ async function handleWallet(request, env) {
   return json({ error: "not_found" }, { status: 404 });
 }
 
+// --- API: /api/billing (Stripe) ---
+//
+// Optional. The full path stays dormant when STRIPE_SECRET_KEY +
+// STRIPE_WEBHOOK_SECRET + STRIPE_PRICE_ID aren't configured — endpoints return
+// 503 stripe_not_configured rather than 500ing or pretending to work. Once
+// keys land in the Worker secrets, paid checkout + portal + webhook activate.
+//
+// Source of truth is Stripe. The user_subscriptions table mirrors the latest
+// state for fast reads; users.plan is the denormalized "effective baseline
+// plan" used by resolveUserTier and quota lookups.
+
+const STRIPE_API_BASE = "https://api.stripe.com/v1";
+const STRIPE_SIG_TOLERANCE_SEC = 300;
+
+function stripeConfigured(env) {
+  return !!(env && env.STRIPE_SECRET_KEY && env.STRIPE_PRICE_ID);
+}
+
+function stripeWebhookConfigured(env) {
+  return !!(env && env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET);
+}
+
+// Encode an object as application/x-www-form-urlencoded the way Stripe expects
+// (nested keys are bracketed: line_items[0][price], metadata[user_id]).
+function stripeEncodeForm(obj, prefix = "") {
+  const parts = [];
+  for (const [k, raw] of Object.entries(obj)) {
+    if (raw == null) continue;
+    const key = prefix ? `${prefix}[${k}]` : k;
+    if (Array.isArray(raw)) {
+      raw.forEach((item, i) => {
+        const arrKey = `${key}[${i}]`;
+        if (item != null && typeof item === "object") {
+          parts.push(stripeEncodeForm(item, arrKey));
+        } else if (item != null) {
+          parts.push(
+            `${encodeURIComponent(arrKey)}=${encodeURIComponent(String(item))}`,
+          );
+        }
+      });
+    } else if (typeof raw === "object") {
+      parts.push(stripeEncodeForm(raw, key));
+    } else {
+      parts.push(
+        `${encodeURIComponent(key)}=${encodeURIComponent(String(raw))}`,
+      );
+    }
+  }
+  return parts.filter(Boolean).join("&");
+}
+
+async function stripeApi(env, path, body) {
+  if (!env.STRIPE_SECRET_KEY) throw new Error("stripe_not_configured");
+  const res = await fetch(`${STRIPE_API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${env.STRIPE_SECRET_KEY}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body: body ? stripeEncodeForm(body) : "",
+  });
+  let json;
+  try {
+    json = await res.json();
+  } catch {
+    json = null;
+  }
+  if (!res.ok) {
+    const msg = (json && json.error && (json.error.message || json.error.type)) || `stripe_${res.status}`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.body = json;
+    throw err;
+  }
+  return json;
+}
+
+// Constant-time hex string compare so signature verification doesn't leak
+// timing info to an attacker probing the webhook endpoint.
+function constantTimeEqual(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+async function stripeVerifyWebhook(env, rawBody, signatureHeader) {
+  if (!stripeWebhookConfigured(env)) return false;
+  if (!signatureHeader || typeof signatureHeader !== "string") return false;
+  let tStr = null;
+  const v1s = [];
+  for (const part of signatureHeader.split(",")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (k === "t") tStr = v;
+    else if (k === "v1") v1s.push(v);
+  }
+  if (!tStr || v1s.length === 0) return false;
+  const t = parseInt(tStr, 10);
+  if (!Number.isFinite(t)) return false;
+  if (Math.abs(nowSec() - t) > STRIPE_SIG_TOLERANCE_SEC) return false;
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(env.STRIPE_WEBHOOK_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sigBuf = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    enc.encode(`${tStr}.${rawBody}`),
+  );
+  const hex = Array.from(new Uint8Array(sigBuf), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
+  return v1s.some((v) => constantTimeEqual(hex, v));
+}
+
+function isPaidSubscriptionStatus(status) {
+  // Statuses that grant access. past_due keeps access during the dunning
+  // window — Stripe will downgrade us via subscription.deleted if dunning
+  // ultimately fails, at which point we flip to 'free'.
+  return status === "active" || status === "trialing" || status === "past_due";
+}
+
+async function dbGetSubscription(env, userId) {
+  if (!hasDb(env)) return null;
+  return env.DB
+    .prepare(
+      `SELECT user_id, stripe_customer_id, stripe_subscription_id, status, plan,
+              current_period_end, cancel_at_period_end, updated_at
+         FROM user_subscriptions WHERE user_id = ?`,
+    )
+    .bind(userId)
+    .first();
+}
+
+async function dbGetSubscriptionByCustomer(env, customerId) {
+  if (!hasDb(env) || !customerId) return null;
+  return env.DB
+    .prepare(
+      `SELECT user_id, stripe_customer_id, stripe_subscription_id, status, plan,
+              current_period_end, cancel_at_period_end, updated_at
+         FROM user_subscriptions WHERE stripe_customer_id = ?`,
+    )
+    .bind(customerId)
+    .first();
+}
+
+async function dbUpsertSubscription(env, row) {
+  const ts = nowSec();
+  await env.DB
+    .prepare(
+      `INSERT INTO user_subscriptions
+         (user_id, stripe_customer_id, stripe_subscription_id, status, plan,
+          current_period_end, cancel_at_period_end, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         stripe_customer_id = excluded.stripe_customer_id,
+         stripe_subscription_id = excluded.stripe_subscription_id,
+         status = excluded.status,
+         plan = excluded.plan,
+         current_period_end = excluded.current_period_end,
+         cancel_at_period_end = excluded.cancel_at_period_end,
+         updated_at = excluded.updated_at`,
+    )
+    .bind(
+      row.user_id,
+      row.stripe_customer_id,
+      row.stripe_subscription_id || null,
+      row.status,
+      row.plan,
+      row.current_period_end || null,
+      row.cancel_at_period_end ? 1 : 0,
+      ts,
+    )
+    .run();
+}
+
+async function dbSetUserPlan(env, userId, plan) {
+  await env.DB
+    .prepare(`UPDATE users SET plan = ?, updated_at = ? WHERE id = ?`)
+    .bind(plan, nowSec(), userId)
+    .run();
+}
+
+// Get or create a Stripe customer for the user. Idempotent — we cache the id
+// in user_subscriptions on first checkout so subsequent calls reuse it.
+async function stripeEnsureCustomer(env, user) {
+  const existing = await dbGetSubscription(env, user.id);
+  if (existing && existing.stripe_customer_id) return existing.stripe_customer_id;
+  const created = await stripeApi(env, "/customers", {
+    email: user.email || undefined,
+    name: user.name || undefined,
+    metadata: { aeon_user_id: user.id },
+  });
+  // Pre-seed a row so we have the customer mapping even before the first
+  // checkout.session.completed webhook fires. plan stays 'free' until activated.
+  await dbUpsertSubscription(env, {
+    user_id: user.id,
+    stripe_customer_id: created.id,
+    stripe_subscription_id: null,
+    status: "incomplete",
+    plan: "free",
+    current_period_end: null,
+    cancel_at_period_end: false,
+  });
+  return created.id;
+}
+
+function serializeSubscription(row) {
+  if (!row) return null;
+  return {
+    status: row.status,
+    plan: row.plan,
+    current_period_end: row.current_period_end,
+    cancel_at_period_end: !!row.cancel_at_period_end,
+    has_payment_method: !!row.stripe_subscription_id,
+  };
+}
+
+async function handleBilling(request, env) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS });
+  }
+  if (!hasDb(env)) return json({ error: "db_not_configured" }, { status: 503 });
+  await ensureSchema(env);
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  // Webhook runs first — it has no session cookie and uses signature auth.
+  if (path === "/api/billing/webhook" && request.method === "POST") {
+    if (!stripeWebhookConfigured(env)) {
+      return json({ error: "stripe_not_configured" }, { status: 503 });
+    }
+    const rawBody = await request.text();
+    const sig = request.headers.get("stripe-signature") || "";
+    const ok = await stripeVerifyWebhook(env, rawBody, sig);
+    if (!ok) return json({ error: "bad_signature" }, { status: 400 });
+    let event;
+    try {
+      event = JSON.parse(rawBody);
+    } catch {
+      return json({ error: "bad_json" }, { status: 400 });
+    }
+    try {
+      await handleStripeEvent(env, event);
+    } catch (err) {
+      // Log to console for Cloudflare tail; return 500 so Stripe retries.
+      console.error("stripe webhook error", event && event.type, err);
+      return json({ error: "webhook_error" }, { status: 500 });
+    }
+    return json({ received: true });
+  }
+
+  const user = await currentUser(request, env);
+  if (!user) return json({ error: "sign_in_required" }, { status: 401 });
+
+  if (path === "/api/billing/me" && request.method === "GET") {
+    const row = await dbGetSubscription(env, user.id);
+    return json({
+      configured: stripeConfigured(env),
+      subscription: serializeSubscription(row),
+    });
+  }
+
+  if (path === "/api/billing/checkout" && request.method === "POST") {
+    if (!stripeConfigured(env)) {
+      return json({ error: "stripe_not_configured" }, { status: 503 });
+    }
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {
+      body = {};
+    }
+    const successRel = sanitizeReturnPath(body && body.success_path) || "/account";
+    const cancelRel = sanitizeReturnPath(body && body.cancel_path) || "/account";
+    const customerId = await stripeEnsureCustomer(env, user);
+    const session = await stripeApi(env, "/checkout/sessions", {
+      mode: "subscription",
+      customer: customerId,
+      client_reference_id: user.id,
+      // The single price drives the paid tier. Multiple-tier support can come
+      // later by passing different price IDs; for now we hardcode the env one.
+      line_items: [{ price: env.STRIPE_PRICE_ID, quantity: 1 }],
+      success_url: `https://${CANONICAL_HOST}${successRel}?billing=success&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `https://${CANONICAL_HOST}${cancelRel}?billing=cancel`,
+      allow_promotion_codes: "true",
+      subscription_data: { metadata: { aeon_user_id: user.id } },
+      metadata: { aeon_user_id: user.id },
+    });
+    return json({ url: session.url, id: session.id });
+  }
+
+  if (path === "/api/billing/portal" && request.method === "POST") {
+    if (!stripeConfigured(env)) {
+      return json({ error: "stripe_not_configured" }, { status: 503 });
+    }
+    const sub = await dbGetSubscription(env, user.id);
+    if (!sub || !sub.stripe_customer_id) {
+      return json({ error: "no_subscription" }, { status: 404 });
+    }
+    let body = {};
+    try {
+      body = await request.json();
+    } catch {
+      body = {};
+    }
+    const returnRel = sanitizeReturnPath(body && body.return_path) || "/account";
+    const portal = await stripeApi(env, "/billing_portal/sessions", {
+      customer: sub.stripe_customer_id,
+      return_url: `https://${CANONICAL_HOST}${returnRel}`,
+    });
+    return json({ url: portal.url });
+  }
+
+  return json({ error: "not_found" }, { status: 404 });
+}
+
+async function handleStripeEvent(env, event) {
+  switch (event && event.type) {
+    case "checkout.session.completed": {
+      const session = event.data && event.data.object;
+      if (!session) return;
+      const userId = session.client_reference_id || (session.metadata && session.metadata.aeon_user_id);
+      const customerId = session.customer;
+      const subscriptionId = session.subscription;
+      if (!userId || !customerId) return;
+      // Fetch subscription details for status + period end. The session payload
+      // doesn't include them inline reliably across API versions.
+      let sub = null;
+      if (subscriptionId) {
+        try {
+          sub = await stripeApi(env, `/subscriptions/${encodeURIComponent(subscriptionId)}`, null);
+        } catch {
+          sub = null;
+        }
+      }
+      const status = (sub && sub.status) || "active";
+      const periodEnd = (sub && sub.current_period_end) || null;
+      const cancelAtPeriodEnd = !!(sub && sub.cancel_at_period_end);
+      const plan = isPaidSubscriptionStatus(status) ? "paid" : "free";
+      await dbUpsertSubscription(env, {
+        user_id: userId,
+        stripe_customer_id: customerId,
+        stripe_subscription_id: subscriptionId || null,
+        status,
+        plan,
+        current_period_end: periodEnd,
+        cancel_at_period_end: cancelAtPeriodEnd,
+      });
+      await dbSetUserPlan(env, userId, plan);
+      return;
+    }
+    case "customer.subscription.created":
+    case "customer.subscription.updated":
+    case "customer.subscription.deleted": {
+      const sub = event.data && event.data.object;
+      if (!sub) return;
+      const customerId = sub.customer;
+      // Find user by customer id (the row was pre-seeded at checkout).
+      let row = await dbGetSubscriptionByCustomer(env, customerId);
+      let userId = row && row.user_id;
+      if (!userId) {
+        userId = sub.metadata && sub.metadata.aeon_user_id;
+      }
+      if (!userId) return;
+      const status = event.type === "customer.subscription.deleted" ? "canceled" : sub.status;
+      const plan = isPaidSubscriptionStatus(status) ? "paid" : "free";
+      await dbUpsertSubscription(env, {
+        user_id: userId,
+        stripe_customer_id: customerId,
+        stripe_subscription_id: sub.id,
+        status,
+        plan,
+        current_period_end: sub.current_period_end || null,
+        cancel_at_period_end: !!sub.cancel_at_period_end,
+      });
+      await dbSetUserPlan(env, userId, plan);
+      return;
+    }
+    case "invoice.payment_failed": {
+      // We don't downgrade on first failure — Stripe retries and emits
+      // subscription.updated → status: 'past_due' or 'unpaid' which the
+      // handler above picks up. This branch exists so we can log it.
+      return;
+    }
+    default:
+      return;
+  }
+}
+
 // --- D1: OAuth state ---
 
 async function dbStoreOAuthState(env, state, provider, codeVerifier, redirectTo) {
@@ -3027,6 +3446,10 @@ const worker = {
     if (path === "/api/wallet/nonce" || path === "/api/wallet/verify" ||
         path === "/api/wallet/me" || path === "/api/wallet/refresh") {
       return handleWallet(request, env);
+    }
+    if (path === "/api/billing/me" || path === "/api/billing/checkout" ||
+        path === "/api/billing/portal" || path === "/api/billing/webhook") {
+      return handleBilling(request, env);
     }
 
     // Brand subdomains: redirect to canonical apex so we have one source of truth.
