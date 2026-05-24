@@ -1038,6 +1038,9 @@ async function ensureSchema(env) {
       balance_wei TEXT NOT NULL DEFAULT '0',
       balance_at INTEGER NOT NULL DEFAULT 0
     )`,
+    // Older deploys had only this non-unique index. We keep it for backward
+    // compatibility and add a UNIQUE index below (after deduping any stragglers)
+    // so the 1-wallet-1-account invariant is enforced at the DB layer too.
     `CREATE INDEX IF NOT EXISTS idx_user_wallets_addr ON user_wallets(address)`,
     // Short-lived nonces signed by the wallet during the connect flow.
     `CREATE TABLE IF NOT EXISTS wallet_nonces (
@@ -1051,6 +1054,7 @@ async function ensureSchema(env) {
   for (const sql of statements) {
     await env.DB.prepare(sql).run();
   }
+  await ensureWalletAddressUniqueIndex(env);
   schemaReady = true;
 }
 
@@ -1701,6 +1705,41 @@ async function dbDeleteWalletByAddress(env, address) {
     .run();
 }
 
+// Promote idx_user_wallets_addr to a UNIQUE index so the 1-wallet-1-account
+// invariant is enforced at the DB layer (defense-in-depth on top of the
+// application-level lookup-and-transfer in /api/wallet/verify). If a previous
+// deploy left duplicate address rows, dedupe (keep most recent rowid) before
+// creating the unique index.
+async function ensureWalletAddressUniqueIndex(env) {
+  try {
+    await env.DB
+      .prepare(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_user_wallets_addr_unique ON user_wallets(address)`,
+      )
+      .run();
+    return;
+  } catch {
+    // Most likely cause: duplicate addresses already in the table. Dedupe.
+  }
+  try {
+    await env.DB
+      .prepare(
+        `DELETE FROM user_wallets WHERE rowid NOT IN (
+          SELECT MAX(rowid) FROM user_wallets GROUP BY address
+        )`,
+      )
+      .run();
+    await env.DB
+      .prepare(
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_user_wallets_addr_unique ON user_wallets(address)`,
+      )
+      .run();
+  } catch {
+    // Last resort: leave the schema alone. The application-level lookup-and-
+    // transfer in /api/wallet/verify still guards against multi-account links.
+  }
+}
+
 async function dbUpdateWalletBalance(env, userId, balanceWei, ts) {
   await env.DB
     .prepare(
@@ -1936,16 +1975,33 @@ async function handleWallet(request, env) {
     // different user, transfer the link. The signer just proved current
     // control, so the new account wins. This prevents a single holder wallet
     // from unlocking paid quota on N accounts simultaneously.
+    //
+    // Lookup is wrapped in try/catch because a stale read is benign — the
+    // UNIQUE index on user_wallets(address) (see ensureWalletAddressUniqueIndex)
+    // will still reject a duplicate at the DB layer. The DELETE, however, is
+    // critical: if we found a previous owner but the delete fails, we MUST
+    // bail rather than upsert a duplicate row.
     let transferred = false;
+    let prevOwner = null;
     try {
-      const prevOwner = await dbWalletOwnerForAddress(env, normAddr);
-      if (prevOwner && prevOwner !== user.id) {
+      prevOwner = await dbWalletOwnerForAddress(env, normAddr);
+    } catch {
+      // Lookup failed; rely on the UNIQUE index to catch any duplicate.
+    }
+    if (prevOwner && prevOwner !== user.id) {
+      try {
         await dbDeleteWalletByAddress(env, normAddr);
         transferred = true;
+      } catch {
+        return json(
+          {
+            error: "wallet_transfer_failed",
+            message:
+              "Could not transfer the wallet link from another account. Try again.",
+          },
+          { status: 500 },
+        );
       }
-    } catch {
-      // If the lookup fails, fall through to upsert — the unique constraint
-      // is best-effort defense-in-depth, not a hard invariant.
     }
     const ts = nowSec();
     let balanceWei = 0n;
@@ -1955,7 +2011,21 @@ async function handleWallet(request, env) {
       // We still link the wallet on RPC failure; balance refresh will retry.
       balanceWei = 0n;
     }
-    await dbUpsertWallet(env, user.id, normAddr, balanceWei, ts);
+    try {
+      await dbUpsertWallet(env, user.id, normAddr, balanceWei, ts);
+    } catch {
+      // UNIQUE index on user_wallets(address) rejected the insert — most
+      // likely a concurrent verify won the race. Surface a retriable error
+      // rather than leaving the user in an inconsistent state.
+      return json(
+        {
+          error: "wallet_link_failed",
+          message:
+            "Wallet link failed (likely a concurrent change). Try again in a moment.",
+        },
+        { status: 409 },
+      );
+    }
     const tier = await resolveUserTier(env, user);
     return json({ ok: true, tier, transferred });
   }
