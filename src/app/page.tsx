@@ -35,13 +35,13 @@ export default function HomePage() {
       {/* HERO */}
       <section className="relative overflow-hidden border-b border-border">
         <div aria-hidden className="absolute inset-0 dots opacity-50" />
-        <div className="relative mx-auto grid max-w-6xl gap-10 px-4 py-16 sm:px-6 lg:grid-cols-2 lg:gap-14 lg:py-24">
+        <div className="relative mx-auto grid max-w-6xl gap-8 px-4 py-10 sm:gap-10 sm:px-6 sm:py-16 lg:grid-cols-2 lg:gap-14 lg:py-24">
           <div className="flex flex-col justify-center gap-6">
             <p className="inline-flex w-fit items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-[11px] uppercase tracking-widest text-muted">
               <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--accent)]" />
               autonomous agent terminal · v0.1.0
             </p>
-            <h1 className="text-3xl leading-[1.1] tracking-tight text-foreground sm:text-4xl md:text-5xl">
+            <h1 className="text-balance text-[1.75rem] leading-[1.1] tracking-tight text-foreground sm:text-4xl md:text-5xl">
               <span className="text-muted">$</span>{" "}
               <span className="text-foreground">aeon</span>
               <span className="text-muted">·</span>
@@ -89,11 +89,13 @@ export default function HomePage() {
                   v: "30",
                 },
               ].map((s) => (
-                <div key={s.k} className="bg-surface px-4 py-3">
+                <div key={s.k} className="bg-surface px-2 py-3 sm:px-4">
                   <dt className="text-[10px] uppercase tracking-widest text-muted-2">
                     {s.k}
                   </dt>
-                  <dd className="text-lg text-foreground">{s.v}</dd>
+                  <dd className="text-base text-foreground sm:text-lg">
+                    {s.v}
+                  </dd>
                 </div>
               ))}
             </dl>
@@ -111,7 +113,7 @@ export default function HomePage() {
 
       {/* PRINCIPLES */}
       <section className="border-b border-border">
-        <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
+        <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6 sm:py-16">
           <div className="mb-10 flex items-end justify-between gap-4 border-b border-border pb-4">
             <div>
               <p className="text-[11px] uppercase tracking-widest text-muted">
@@ -164,7 +166,7 @@ export default function HomePage() {
 
       {/* FEATURED SKILLS */}
       <section className="border-b border-border">
-        <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
+        <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6 sm:py-16">
           <div className="mb-8 flex flex-wrap items-end justify-between gap-4">
             <div>
               <p className="text-[11px] uppercase tracking-widest text-muted">
@@ -215,7 +217,7 @@ export default function HomePage() {
 
       {/* COMPARISON */}
       <section className="border-b border-border">
-        <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
+        <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6 sm:py-16">
           <div className="mb-8">
             <p className="text-[11px] uppercase tracking-widest text-muted">
               why a terminal
@@ -231,8 +233,8 @@ export default function HomePage() {
               that never asks.
             </p>
           </div>
-          <div className="overflow-hidden rounded border border-border bg-surface">
-            <table className="w-full text-sm">
+          <div className="overflow-x-auto rounded border border-border bg-surface">
+            <table className="w-full min-w-[36rem] text-sm">
               <thead>
                 <tr className="border-b border-border bg-surface-2 text-left text-[11px] uppercase tracking-widest text-muted">
                   <th className="px-4 py-3 font-normal">capability</th>
@@ -267,7 +269,7 @@ export default function HomePage() {
 
       {/* TOKEN + ROADMAP TEASER */}
       <section className="border-b border-border">
-        <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
+        <div className="mx-auto max-w-6xl px-4 py-12 sm:px-6 sm:py-16">
           <div className="mb-8 flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
             <div>
               <p className="text-[11px] uppercase tracking-widest text-muted">
@@ -349,11 +351,11 @@ export default function HomePage() {
 
       {/* CTA */}
       <section>
-        <div className="mx-auto max-w-3xl px-4 py-20 text-center sm:px-6">
+        <div className="mx-auto max-w-3xl px-4 py-14 text-center sm:px-6 sm:py-20">
           <p className="text-[11px] uppercase tracking-widest text-muted">
             $ aeon connect
           </p>
-          <h2 className="mt-3 text-3xl tracking-tight text-foreground sm:text-4xl">
+          <h2 className="mt-3 text-2xl tracking-tight text-foreground sm:text-3xl md:text-4xl">
             Boot the terminal.{" "}
             <span className="text-accent glow-accent">Run a skill.</span>
           </h2>

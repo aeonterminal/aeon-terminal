@@ -19,12 +19,12 @@ export function SiteFooter() {
           <span className="text-muted-2" aria-hidden>
             ·
           </span>
-          <code className="truncate font-medium text-accent">
+          <code className="min-w-0 break-all font-medium text-accent">
             {TOKEN.address}
           </code>
           <CopyAddressButton className="text-muted-2" />
         </div>
-        <div className="flex flex-shrink-0 items-center gap-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <a
             href={TOKEN.buyUrl}
             target="_blank"

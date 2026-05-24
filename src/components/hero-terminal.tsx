@@ -75,7 +75,7 @@ export function HeroTerminal() {
   return (
     <div
       ref={scrollRef}
-      className="no-scrollbar relative h-[420px] overflow-y-auto bg-[#050708] px-4 py-3 text-[13px] leading-6 sm:px-5"
+      className="no-scrollbar relative h-[340px] overflow-y-auto bg-[#050708] px-4 py-3 text-[12px] leading-6 sm:h-[420px] sm:px-5 sm:text-[13px]"
     >
       {lines.map((l, i) => (
         <LineRow key={i} kind={l.kind} text={l.text} tone={l.tone} />
