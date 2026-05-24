@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
+import { CABanner } from "@/components/ca-banner";
 import { SiteHeader } from "@/components/site-header";
 import { SiteFooter } from "@/components/site-footer";
 
@@ -59,6 +60,7 @@ export default function RootLayout({
   return (
     <html lang="en" className={`${mono.variable} h-full antialiased`}>
       <body className="min-h-full flex flex-col relative isolate">
+        <CABanner />
         <SiteHeader />
         <main className="flex-1 relative z-10">{children}</main>
         <SiteFooter />
