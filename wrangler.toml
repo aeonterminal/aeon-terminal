@@ -14,7 +14,7 @@ run_worker_first = true
 [[d1_databases]]
 binding = "DB"
 database_name = "aeon_terminal"
-database_id = "3dc3f1e5-eef7-46e2-a374-11a1cdc98be4"
+database_id = "60b9c5d6-151e-4971-a78c-22a24617ff58"
 
 # Secrets configured via Cloudflare dashboard (Settings → Variables and Secrets):
 #   ANTHROPIC_API_KEY     — Claude API key
