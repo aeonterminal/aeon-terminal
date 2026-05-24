@@ -2772,16 +2772,33 @@ async function handleStatus(request, env) {
     .map(([k]) => k);
   const totalSkills = Object.keys(SKILL_REGISTRY).length;
 
-  const probes = {
-    d1: await probeWithTimeout("d1", async () => {
+  // Run all four health probes AND all D1 counter queries in a single
+  // Promise.all so the response time is dominated by the slowest call, not
+  // the sum. Without this, the four awaits below executed sequentially —
+  // worst case 4 * 2500ms = 10s for the probes alone before the DB queries
+  // even started.
+  const [
+    d1Probe,
+    baseRpcProbe,
+    dexscreenerProbe,
+    githubProbe,
+    askRow,
+    runRow,
+    usersRow,
+    walletsRow,
+    activeRow,
+    usersDayRow,
+    runsByRow,
+  ] = await Promise.all([
+    probeWithTimeout("d1", async () => {
       const row = await env.DB.prepare("SELECT 1 AS ok").first();
       return { result: row && row.ok === 1 ? "pong" : "unexpected" };
     }),
-    base_rpc: await probeWithTimeout("base_rpc", async () => {
+    probeWithTimeout("base_rpc", async () => {
       const blockHex = await rpcCall(env, "eth_blockNumber", []);
       return { block_number: Number.parseInt(blockHex, 16) };
     }),
-    dexscreener: await probeWithTimeout("dexscreener", async () => {
+    probeWithTimeout("dexscreener", async () => {
       const res = await fetch(
         `https://api.dexscreener.com/latest/dex/tokens/${TOKEN_CONTRACT_ADDRESS}`,
         { cf: { cacheTtl: 0 } },
@@ -2789,7 +2806,7 @@ async function handleStatus(request, env) {
       if (!res.ok) throw new Error(`http_${res.status}`);
       return {};
     }),
-    github: await probeWithTimeout("github", async () => {
+    probeWithTimeout("github", async () => {
       // GitHub's API rejects requests without a User-Agent header and applies
       // strict per-IP rate limits to anonymous worker traffic. Hitting the
       // repo we already render on the home page keeps the probe meaningful.
@@ -2806,10 +2823,6 @@ async function handleStatus(request, env) {
       if (!res.ok) throw new Error(`http_${res.status}`);
       return {};
     }),
-  };
-
-  const [askRow, runRow, usersRow, walletsRow, activeRow, usersDayRow, runsByRow] =
-    await Promise.all([
       env.DB.prepare(
         `SELECT COALESCE(SUM(asks), 0) AS s FROM usage_daily WHERE day = ?`,
       )
@@ -2837,7 +2850,14 @@ async function handleStatus(request, env) {
            FROM memory_runs WHERE skill IS NOT NULL AND skill <> ''
            GROUP BY skill ORDER BY last_at DESC`,
       ).all(),
-    ]);
+  ]);
+
+  const probes = {
+    d1: d1Probe,
+    base_rpc: baseRpcProbe,
+    dexscreener: dexscreenerProbe,
+    github: githubProbe,
+  };
 
   const skillStats = new Map();
   if (runsByRow && Array.isArray(runsByRow.results)) {
@@ -2886,10 +2906,11 @@ async function handleStatus(request, env) {
     took_ms: Date.now() - startedAt,
   };
 
-  return new Response(JSON.stringify(payload), {
-    status: 200,
+  // Use the shared json() helper so we inherit CORS headers — without these,
+  // any cross-origin consumer (third-party monitoring, embed widgets) would
+  // be blocked by the browser even though the endpoint is unauthenticated.
+  return json(payload, {
     headers: {
-      "content-type": "application/json; charset=utf-8",
       // Edge-cache 30s, allow stale for 60s while revalidating
       "cache-control":
         "public, max-age=30, s-maxage=30, stale-while-revalidate=60",
