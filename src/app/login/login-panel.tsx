@@ -96,7 +96,7 @@ export function LoginPanel() {
   );
 
   return (
-    <section className="space-y-5 rounded-lg border border-border bg-surface p-5 sm:p-6">
+    <section className="space-y-4 px-6 py-5">
       {error ? (
         <div
           role="alert"
@@ -106,63 +106,76 @@ export function LoginPanel() {
         </div>
       ) : null}
 
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="space-y-2">
         <a
           href="/api/auth/google/login?redirect=%2Fterminal"
-          className="group flex items-center justify-center gap-2 rounded border border-border bg-background px-3 py-2.5 text-sm text-foreground transition-colors hover:border-accent hover:text-accent"
+          className="group flex w-full items-center justify-center gap-3 rounded border border-border-strong bg-background px-3 py-2.5 text-sm text-foreground transition-colors hover:border-accent hover:bg-surface-2"
         >
           <GoogleGlyph />
           <span>Continue with Google</span>
         </a>
         <a
           href="/api/auth/github/login?redirect=%2Fterminal"
-          className="group flex items-center justify-center gap-2 rounded border border-border bg-background px-3 py-2.5 text-sm text-foreground transition-colors hover:border-accent hover:text-accent"
+          className="group flex w-full items-center justify-center gap-3 rounded border border-border-strong bg-background px-3 py-2.5 text-sm text-foreground transition-colors hover:border-accent hover:bg-surface-2"
         >
           <GithubGlyph />
           <span>Continue with GitHub</span>
         </a>
       </div>
 
-      <div className="flex items-center gap-3 text-[10px] uppercase tracking-[0.3em] text-muted">
+      <div
+        aria-hidden
+        className="flex items-center gap-3 py-1 text-[10px] uppercase tracking-[0.3em] text-muted-2"
+      >
         <span className="h-px flex-1 bg-border" />
-        <span>or via email</span>
+        <span>or</span>
         <span className="h-px flex-1 bg-border" />
       </div>
 
-      <form onSubmit={submitEmail} className="space-y-3">
-        <label className="block text-xs text-muted" htmlFor="login-email">
-          email address
-        </label>
-        <div className="flex flex-col gap-2 sm:flex-row">
-          <input
-            id="login-email"
-            type="email"
-            inputMode="email"
-            autoComplete="email"
-            required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@domain.com"
-            className="flex-1 rounded border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted focus:border-accent focus:outline-none"
-            disabled={sending || sent}
-          />
-          <button
-            type="submit"
-            disabled={sending || sent || !email.trim()}
-            className="inline-flex items-center justify-center rounded border border-accent bg-accent/15 px-4 py-2 text-sm font-medium text-accent transition-colors hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-60"
+      <form onSubmit={submitEmail} className="space-y-2">
+        <div className="flex items-baseline justify-between">
+          <label
+            htmlFor="login-email"
+            className="text-[10px] uppercase tracking-[0.25em] text-muted-2"
           >
-            {sending ? "sending…" : sent ? "sent" : "send magic link"}
-          </button>
+            email address
+          </label>
+          <span className="text-[10px] text-muted-2">magic link · 15 min</span>
         </div>
+        <input
+          id="login-email"
+          type="email"
+          inputMode="email"
+          autoComplete="email"
+          required
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="you@domain.com"
+          className="block w-full rounded border border-border-strong bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-2 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
+          disabled={sending || sent}
+        />
+        <button
+          type="submit"
+          disabled={sending || sent || !email.trim()}
+          className="inline-flex w-full items-center justify-center gap-2 rounded border border-accent bg-accent/15 px-4 py-2.5 text-sm font-medium text-accent transition-colors hover:bg-accent/25 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <span aria-hidden>{">"}</span>
+          <span>
+            {sending ? "sending…" : sent ? "link sent — check inbox" : "send magic link"}
+          </span>
+        </button>
         {emailError ? (
-          <div className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+          <div
+            role="alert"
+            className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-200"
+          >
             {emailError}
           </div>
         ) : null}
         {sent ? (
-          <div className="rounded border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200">
-            Check your inbox — the link expires in 15 minutes. (Look in spam if
-            you don&apos;t see it.)
+          <div className="rounded border border-accent-2/40 bg-accent-2/10 px-3 py-2 text-xs text-accent-2">
+            Check your inbox — the link expires in 15 minutes. (Look in spam
+            if you don&apos;t see it.)
           </div>
         ) : null}
       </form>
