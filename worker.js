@@ -1779,16 +1779,109 @@ async function handleEmailRequest(request, env) {
   return json({ ok: true });
 }
 
+// Magic link verify is a deliberate two-step:
+//   GET  /api/auth/email/verify?token=...  -> render a confirm page (no db write)
+//   POST /api/auth/email/verify with token=... (form-encoded) -> consume + session
+//
+// Email link scanners (gmail, slack, imessage, outlook, etc.) prefetch links
+// with GET to check for phishing. If the GET handler consumed the single-use
+// token, the scanner would burn the user's link in transit and they'd see
+// `token_expired` on first real click. Keeping consumption behind POST means
+// only an actual button-click from the real browser completes sign-in.
 async function handleEmailVerify(request, env) {
   if (!hasDb(env)) return loginError("db_not_configured");
   await ensureSchema(env);
   const url = new URL(request.url);
-  const token = url.searchParams.get("token") || "";
-  if (!token || !/^[a-f0-9]{32,128}$/.test(token)) return loginError("invalid_token");
-  const row = await dbConsumeMagicToken(env, token);
-  if (!row) return loginError("token_expired");
-  const userId = await dbUpsertEmailUser(env, row.email);
-  return loginSuccess(request, env, userId, row.redirect_to);
+  const method = request.method.toUpperCase();
+
+  if (method === "GET" || method === "HEAD") {
+    const token = url.searchParams.get("token") || "";
+    if (!token || !/^[a-f0-9]{32,128}$/.test(token)) return loginError("invalid_token");
+    return new Response(method === "HEAD" ? null : renderConfirmPage(token), {
+      status: 200,
+      headers: {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store, max-age=0",
+        "x-robots-tag": "noindex, nofollow",
+        "referrer-policy": "no-referrer",
+      },
+    });
+  }
+
+  if (method === "POST") {
+    let token = "";
+    const ct = (request.headers.get("content-type") || "").toLowerCase();
+    if (
+      ct.includes("application/x-www-form-urlencoded") ||
+      ct.includes("multipart/form-data")
+    ) {
+      try {
+        const form = await request.formData();
+        token = String(form.get("token") || "");
+      } catch {
+        token = "";
+      }
+    } else if (ct.includes("application/json")) {
+      try {
+        const body = await request.json();
+        token = String(body?.token || "");
+      } catch {
+        token = "";
+      }
+    }
+    if (!token) token = url.searchParams.get("token") || "";
+    if (!token || !/^[a-f0-9]{32,128}$/.test(token)) return loginError("invalid_token");
+    const row = await dbConsumeMagicToken(env, token);
+    if (!row) return loginError("token_expired");
+    const userId = await dbUpsertEmailUser(env, row.email);
+    return loginSuccess(request, env, userId, row.redirect_to);
+  }
+
+  return json({ error: "method_not_allowed" }, { status: 405 });
+}
+
+// Token is regex-validated to /^[a-f0-9]{32,128}$/ upstream, so it is safe to
+// embed unescaped inside an HTML attribute.
+function renderConfirmPage(token) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Confirm sign-in &middot; aeon&middot;terminal</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<style>
+:root{--bg:#0a0805;--card:#15110a;--fg:#f0e8da;--muted:#a89e8a;--accent:#FF6B1A;--border:rgba(255,107,26,.18)}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;line-height:1.6;min-height:100%}
+body{display:flex;align-items:center;justify-content:center;padding:24px}
+main{max-width:480px;width:100%;background:var(--card);border:1px solid var(--border);border-radius:12px;padding:28px}
+.prompt{color:var(--accent);font-size:13px;letter-spacing:.04em;margin:0 0 18px;opacity:.85}
+h1{font-size:22px;margin:0 0 14px;font-weight:600;letter-spacing:.01em}
+p{margin:0 0 16px;font-size:14px}
+strong{color:var(--accent);font-weight:600}
+form{display:flex;align-items:center;flex-wrap:wrap;gap:14px;margin:18px 0 0}
+.btn{display:inline-block;padding:12px 22px;background:var(--accent);color:var(--bg);font-family:inherit;font-size:14px;font-weight:600;border:0;border-radius:8px;cursor:pointer;letter-spacing:.02em}
+.btn:hover{filter:brightness(1.08)}
+.cancel{color:var(--muted);font-size:13px;text-decoration:none;border-bottom:1px dashed var(--muted)}
+.cancel:hover{color:var(--fg)}
+.note{margin-top:22px;font-size:12px;color:var(--muted);line-height:1.55}
+</style>
+</head>
+<body>
+<main>
+  <p class="prompt">$ aeon login --confirm</p>
+  <h1>Finish signing in</h1>
+  <p>Click below to complete sign-in to <strong>aeon&middot;terminal</strong>. Your one-time token is consumed only after you click.</p>
+  <form method="POST" action="/api/auth/email/verify">
+    <input type="hidden" name="token" value="${token}">
+    <button type="submit" class="btn">$ confirm sign-in &rarr;</button>
+    <a class="cancel" href="/login">cancel</a>
+  </form>
+  <p class="note">this two-step prevents email link scanners (gmail, slack, imessage, outlook) from burning your single-use token before you click. the link expires 15 minutes after request.</p>
+</main>
+</body>
+</html>`;
 }
 
 async function sendMagicLink(env, email, link) {
