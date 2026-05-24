@@ -13,19 +13,18 @@ const FEATURED_SLUGS = [
   "morning-brief",
   "pr-review",
   "token-alert",
-  "skill-repair",
+  "code-health",
   "deep-research",
-  "syndicate-article",
+  "defi-monitor",
 ];
 
 const COMPARISON = [
-  { label: "Runs unattended on a schedule", you: true, other: "rarely" },
-  { label: "Skills are modular and composable", you: true, other: "monolithic" },
-  { label: "Voice-matched output", you: true, other: "generic" },
-  { label: "Self-heals when a skill fails", you: true, other: "no" },
-  { label: "Persistent memory across runs", you: true, other: "session only" },
-  { label: "Reactive triggers, not just cron", you: true, other: "cron only" },
-  { label: "Zero infrastructure to host", you: true, other: "yours to host" },
+  { label: "Skill catalog you can scroll, not chat into", you: "yes", other: "chat-only" },
+  { label: "Persistent memory across sessions", you: "yes", other: "session only" },
+  { label: "Pulls live data (GitHub, RSS, CoinGecko, DefiLlama)", you: "yes", other: "sometimes" },
+  { label: "Per-user daily quota, no surprise bills", you: "yes", other: "meter\u2011on\u2011token" },
+  { label: "Zero infrastructure to host", you: "yes", other: "yours to host" },
+  { label: "Honest about what's not built yet", you: "yes", other: "rarely" },
 ];
 
 export default function HomePage() {
@@ -48,9 +47,11 @@ export default function HomePage() {
               <span className="caret align-middle" />
             </h1>
             <p className="max-w-xl text-balance text-base leading-relaxed text-muted">
-              A terminal-first control surface for autonomous AI agents.
-              Configure {SKILLS.length}+ skills, schedule runs, fan out
-              notifications, and walk away. No approval loops. No babysitting.
+              A terminal-first control surface for AI agents. Sign in, run one
+              of {SKILLS.filter((s) => !s.comingSoon).length} live skills, or
+              just <span className="text-foreground">ask</span> anything backed
+              by Claude with live web tools. No approval loops, no chat
+              babysitting.
             </p>
             <div className="flex flex-wrap gap-3 pt-2">
               <Link
@@ -76,9 +77,15 @@ export default function HomePage() {
             </div>
             <dl className="grid grid-cols-3 gap-px overflow-hidden rounded border border-border bg-border text-center">
               {[
-                { k: "skills", v: SKILLS.length.toString() },
-                { k: "categories", v: Object.keys(CATEGORIES).length.toString() },
-                { k: "human steps", v: "0" },
+                {
+                  k: "live skills",
+                  v: SKILLS.filter((s) => !s.comingSoon).length.toString(),
+                },
+                { k: "total catalog", v: SKILLS.length.toString() },
+                {
+                  k: "free / day",
+                  v: "30",
+                },
               ].map((s) => (
                 <div key={s.k} className="bg-surface px-4 py-3">
                   <dt className="text-[10px] uppercase tracking-widest text-muted-2">
@@ -121,27 +128,27 @@ export default function HomePage() {
             {[
               {
                 t: "Skills, not scripts.",
-                d: "Each skill is a single markdown file with a prompt, a schedule, and a contract. Composable. Forkable. Replaceable.",
+                d: "Each skill is a prompt with a contract. Pick one from the catalog, type its slug, and the agent fetches what it needs and returns a finished artifact.",
               },
               {
-                t: "Schedule-first.",
-                d: "Cron expressions for what to do every morning. Reactive triggers for what to do when something changes.",
+                t: "Live data, not vibes.",
+                d: "Real skills call real APIs — GitHub, CoinGecko, DefiLlama, OSV.dev, arxiv, HN. If the call fails, the agent says so. It does not invent numbers.",
               },
               {
-                t: "Voice-matched.",
-                d: "Your soul/ directory teaches the agent how you write. Output reads like you, not like ChatGPT.",
+                t: "Persistent memory.",
+                d: "The last few asks and skill runs stay with your account. The next session resumes the thread instead of starting from zero.",
               },
               {
-                t: "Self-healing.",
-                d: "When a skill fails, the agent files an issue, patches the skill, and verifies the fix before notifying you.",
+                t: "Per-user quotas.",
+                d: "30 asks and 10 skill runs per day on free. No metered tokens, no surprise bills, no credit card to try it.",
               },
               {
-                t: "One inbox.",
-                d: "Telegram, Discord, Slack — fan-out is a single line. Each channel is opt-in and silently skipped when missing.",
+                t: "Catalog over chat.",
+                d: "Browse a list, pick a skill, run it. No need to remember the perfect prompt — the prompt lives in the skill file.",
               },
               {
-                t: "Run from anywhere.",
-                d: "A real terminal, a web terminal, or a scheduled action. Same skills. Same memory. No new mental model.",
+                t: "Honest about gaps.",
+                d: "Skills that need integrations we haven't shipped (cron, write-access, Telegram) are labelled coming soon, with the exact requirement printed on the card.",
               },
             ].map((p) => (
               <li key={p.t} className="bg-surface p-5">
@@ -246,7 +253,7 @@ export default function HomePage() {
                     }
                   >
                     <td className="px-4 py-3 text-foreground">{row.label}</td>
-                    <td className="px-4 py-3 text-accent">yes</td>
+                    <td className="px-4 py-3 text-accent">{row.you}</td>
                     <td className="px-4 py-3 text-muted">{row.other}</td>
                   </tr>
                 ))}
@@ -267,15 +274,16 @@ export default function HomePage() {
             <span className="text-accent glow-accent">Run a skill.</span>
           </h2>
           <p className="mx-auto mt-4 max-w-xl text-sm leading-relaxed text-muted">
-            Open the interactive terminal and try{" "}
+            Sign in with Google, GitHub, or a magic link. 30 asks and 10 skill
+            runs every day, free. Try{" "}
             <code className="rounded bg-surface px-1.5 py-0.5 text-foreground">
-              ask hello
+              ask 2 + 2
             </code>{" "}
             or{" "}
             <code className="rounded bg-surface px-1.5 py-0.5 text-foreground">
               run morning-brief
             </code>
-            . Backed by Claude. No login required.
+            . No credit card.
           </p>
           <div className="mt-6 flex flex-wrap justify-center gap-3">
             <Link
