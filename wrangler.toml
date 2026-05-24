@@ -17,10 +17,10 @@ database_name = "aeon_terminal"
 database_id = "3dc3f1e5-eef7-46e2-a374-11a1cdc98be4"
 
 # Secrets configured via Cloudflare dashboard (Settings → Variables and Secrets):
-#   ANTHROPIC_API_KEY — Claude API key
-#   X_CLIENT_ID       — X (Twitter) OAuth 2.0 client id
-#   X_CLIENT_SECRET   — X (Twitter) OAuth 2.0 client secret
-#   SESSION_SECRET    — random 32-byte hex for cookie HMAC (optional, generated if missing)
-
-# Legacy KV binding (no longer used; left as comment for reference):
-#   AEON_MEMORY — KV namespace, replaced by D1.
+#   ANTHROPIC_API_KEY     — Claude API key
+#   GOOGLE_CLIENT_ID      — Google OAuth 2.0 client id
+#   GOOGLE_CLIENT_SECRET  — Google OAuth 2.0 client secret
+#   GITHUB_CLIENT_ID      — GitHub OAuth 2.0 client id
+#   GITHUB_CLIENT_SECRET  — GitHub OAuth 2.0 client secret
+#   RESEND_API_KEY        — Resend API key for email magic links
+#   EMAIL_FROM            — (optional) From address, defaults to "Aeon Terminal <login@aeonterminal.org>"
