@@ -33,3 +33,12 @@ database_id = "60b9c5d6-151e-4971-a78c-22a24617ff58"
 #   STRIPE_SECRET_KEY     — sk_live_... or sk_test_...
 #   STRIPE_WEBHOOK_SECRET — whsec_... from the Stripe webhook endpoint config
 #   STRIPE_PRICE_ID       — price_... for the paid monthly subscription
+
+# Cron Triggers (paid/holder feature: scheduled skill runs). Cloudflare
+# Workers fires scheduled() in worker.js at every tick; the handler queries
+# the user_schedules D1 table for due rows and executes each one. The
+# 15-min cadence is deliberate — it caps invocation count well under the
+# 100k/day free quota and matches the preset granularity exposed to users
+# (hourly, every6h, daily@H, weekly@DOW@H).
+[triggers]
+crons = ["*/15 * * * *"]

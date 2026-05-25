@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 
+import { SKILLS } from "@/lib/skills";
 import { TOKEN, shortAddress } from "@/lib/token";
 
 type Wallet = {
@@ -38,6 +39,29 @@ type Subscription = {
 type BillingMe = {
   configured: boolean;
   subscription: Subscription | null;
+};
+
+type Schedule = {
+  id: string;
+  skill: string;
+  prompt: string;
+  cron: string;
+  cron_label: string;
+  enabled: boolean;
+  next_run_at: number;
+  last_run_at: number | null;
+  last_status: string | null;
+  last_summary: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type SchedulesData = {
+  schedules: Schedule[];
+  limit: number;
+  tier: "free" | "paid";
+  tier_source: string;
+  cron_tick_min: number;
 };
 
 type LoadState =
@@ -86,9 +110,13 @@ function formatRelative(ts: number): string {
 export function AccountClient() {
   const [state, setState] = useState<LoadState>({ kind: "loading" });
   const [billing, setBilling] = useState<BillingMe | null>(null);
+  const [schedules, setSchedules] = useState<SchedulesData | null>(null);
   const [busy, setBusy] = useState<
     null | "connect" | "refresh" | "disconnect" | "checkout" | "portal"
   >(null);
+  // Schedule operations have their own busy slot keyed by id (or "create")
+  // so a slow toggle on one row doesn't lock the entire page out.
+  const [scheduleBusy, setScheduleBusy] = useState<string | null>(null);
   const [flash, setFlash] = useState<{
     kind: "ok" | "err";
     message: string;
@@ -156,6 +184,13 @@ export function AccountClient() {
         if (bRes.ok) {
           setBilling((await bRes.json()) as BillingMe);
         }
+        // Schedules state is independent too; failures fall through silently
+        // so the page still renders.
+        const sRes = await fetch("/api/schedules", { credentials: "include" });
+        if (cancelled) return;
+        if (sRes.ok) {
+          setSchedules((await sRes.json()) as SchedulesData);
+        }
       } catch (err) {
         if (cancelled) return;
         const msg = err instanceof Error ? err.message : String(err);
@@ -192,6 +227,108 @@ export function AccountClient() {
       setBusy(null);
     }
   }, [busy]);
+
+  const refreshSchedules = useCallback(async () => {
+    const res = await fetch("/api/schedules", { credentials: "include" });
+    if (res.ok) {
+      setSchedules((await res.json()) as SchedulesData);
+    }
+  }, []);
+
+  const createSchedule = useCallback(
+    async (input: { skill: string; cron: string; prompt: string }) => {
+      if (scheduleBusy) return;
+      setScheduleBusy("create");
+      setFlash(null);
+      try {
+        const res = await fetch("/api/schedules", {
+          method: "POST",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(input),
+        });
+        const j = (await res.json()) as {
+          error?: string;
+          message?: string;
+        };
+        if (!res.ok) {
+          throw new Error(j.message || j.error || `schedule_create_${res.status}`);
+        }
+        setFlash({ kind: "ok", message: "schedule saved." });
+        await refreshSchedules();
+      } catch (err) {
+        setFlash({
+          kind: "err",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        setScheduleBusy(null);
+      }
+    },
+    [scheduleBusy, refreshSchedules],
+  );
+
+  const toggleSchedule = useCallback(
+    async (id: string, enabled: boolean) => {
+      if (scheduleBusy) return;
+      setScheduleBusy(id);
+      setFlash(null);
+      try {
+        const res = await fetch(`/api/schedules/${id}`, {
+          method: "PATCH",
+          credentials: "include",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        if (!res.ok) {
+          const j = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            message?: string;
+          };
+          throw new Error(j.message || j.error || `schedule_patch_${res.status}`);
+        }
+        await refreshSchedules();
+      } catch (err) {
+        setFlash({
+          kind: "err",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        setScheduleBusy(null);
+      }
+    },
+    [scheduleBusy, refreshSchedules],
+  );
+
+  const deleteSchedule = useCallback(
+    async (id: string) => {
+      if (scheduleBusy) return;
+      setScheduleBusy(id);
+      setFlash(null);
+      try {
+        const res = await fetch(`/api/schedules/${id}`, {
+          method: "DELETE",
+          credentials: "include",
+        });
+        if (!res.ok) {
+          const j = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            message?: string;
+          };
+          throw new Error(j.message || j.error || `schedule_delete_${res.status}`);
+        }
+        await refreshSchedules();
+      } catch (err) {
+        setFlash({
+          kind: "err",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        setScheduleBusy(null);
+      }
+    },
+    [scheduleBusy, refreshSchedules],
+  );
 
   const openPortal = useCallback(async () => {
     if (busy) return;
@@ -462,6 +599,15 @@ export function AccountClient() {
         busy={busy}
         onCheckout={upgradeCheckout}
         onPortal={openPortal}
+      />
+
+      <SchedulesSection
+        data={schedules}
+        tier={tier}
+        scheduleBusy={scheduleBusy}
+        onCreate={createSchedule}
+        onToggle={toggleSchedule}
+        onDelete={deleteSchedule}
       />
 
       <section className="rounded border border-border bg-surface/80 p-5 sm:p-6">
@@ -828,6 +974,329 @@ function SubscriptionSection({
             <code className="text-foreground">503 stripe_not_configured</code>{" "}
             until the secrets ship. Until then, holders get paid quota free via
             the wallet card below — no card needed.
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+// Catalog skill slugs that have a real backend wired up. Coming-soon skills
+// would refuse to run at execute time, so we don't even let users pick them
+// for a schedule.
+const SCHEDULABLE_SKILLS: { slug: string; name: string }[] = SKILLS
+  .filter((s) => !s.comingSoon)
+  .map((s) => ({ slug: s.slug, name: s.name }));
+
+// Hours-of-day options for the daily/weekly preset. UTC-only by design —
+// users see "07:00 UTC" everywhere so timezone drift doesn't surprise them.
+const HOURS_OF_DAY: number[] = Array.from({ length: 24 }, (_, i) => i);
+
+const DAYS_OF_WEEK: { value: number; label: string }[] = [
+  { value: 0, label: "Sun" },
+  { value: 1, label: "Mon" },
+  { value: 2, label: "Tue" },
+  { value: 3, label: "Wed" },
+  { value: 4, label: "Thu" },
+  { value: 5, label: "Fri" },
+  { value: 6, label: "Sat" },
+];
+
+type FreqKind = "daily" | "weekly" | "every6h" | "hourly";
+
+function formatScheduleTimestamp(ts: number | null | undefined): string {
+  if (!ts) return "—";
+  try {
+    // Compact UTC stamp: YYYY-MM-DD HH:mm. No locale shifting so the
+    // "07:00 UTC" presets match what we display here.
+    const d = new Date(ts * 1000);
+    const date = d.toISOString().slice(0, 10);
+    const time = d.toISOString().slice(11, 16);
+    return `${date} ${time}`;
+  } catch {
+    return "—";
+  }
+}
+
+type SchedulesSectionProps = {
+  data: SchedulesData | null;
+  tier: TierInfo;
+  scheduleBusy: string | null;
+  onCreate: (input: { skill: string; cron: string; prompt: string }) => void;
+  onToggle: (id: string, enabled: boolean) => void;
+  onDelete: (id: string) => void;
+};
+
+function SchedulesSection({
+  data,
+  tier,
+  scheduleBusy,
+  onCreate,
+  onToggle,
+  onDelete,
+}: SchedulesSectionProps) {
+  const [formSkill, setFormSkill] = useState<string>(
+    SCHEDULABLE_SKILLS[0]?.slug ?? "morning-brief",
+  );
+  const [formFreq, setFormFreq] = useState<FreqKind>("daily");
+  const [formHour, setFormHour] = useState<number>(7); // 07:00 UTC default
+  const [formDow, setFormDow] = useState<number>(1); // Monday default
+  const [formPrompt, setFormPrompt] = useState<string>("");
+
+  const paid = tier.tier === "paid";
+  const limit = data?.limit ?? 0;
+  const schedules = data?.schedules ?? [];
+  const atLimit = paid && schedules.length >= limit;
+  const tick = data?.cron_tick_min ?? 15;
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    let cron: string;
+    if (formFreq === "hourly") cron = "hourly";
+    else if (formFreq === "every6h") cron = "every6h";
+    else if (formFreq === "daily") cron = `daily@${formHour}`;
+    else cron = `weekly@${formDow}@${formHour}`;
+    onCreate({ skill: formSkill, cron, prompt: formPrompt.trim() });
+    setFormPrompt("");
+  };
+
+  return (
+    <section className="rounded border border-border bg-surface/80 p-5 sm:p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <p className="text-[11px] uppercase tracking-[0.3em] text-muted">
+          $ schedules --cron
+        </p>
+        <p className="text-[11px] text-muted-2">
+          paid tier ·{" "}
+          <span className="text-foreground">
+            up to {limit || 3} schedules
+          </span>{" "}
+          · ticks every{" "}
+          <span className="text-foreground">{tick}min</span>
+        </p>
+      </div>
+
+      {!paid ? (
+        <div className="mt-4 space-y-3">
+          <p className="text-sm text-foreground">
+            Scheduled runs are a paid feature — your skills fire on a cron
+            (e.g. `morning-brief` daily at 07:00 UTC) and stash output to
+            memory.
+          </p>
+          <p className="text-xs leading-relaxed text-muted">
+            Hold ${TOKEN.symbol} to unlock the same paid quota without a card,
+            or upgrade above. Free tier disables this section to keep the worker
+            cron quota predictable.
+          </p>
+        </div>
+      ) : (
+        <div className="mt-4 space-y-4">
+          {schedules.length === 0 ? (
+            <p className="text-xs text-muted">
+              No schedules yet — pick a skill below to wire your first cron.
+            </p>
+          ) : (
+            <ul className="divide-y divide-border rounded border border-border bg-surface">
+              {schedules.map((s) => {
+                const rowBusy = scheduleBusy === s.id;
+                return (
+                  <li
+                    key={s.id}
+                    className="flex flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:gap-4"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                        <code className="text-sm text-foreground">
+                          {s.skill}
+                        </code>
+                        <span
+                          className={`rounded border px-1.5 py-0.5 text-[10px] uppercase ${
+                            s.enabled
+                              ? "border-accent-2/40 text-accent-2"
+                              : "border-border text-muted"
+                          }`}
+                        >
+                          {s.enabled ? "enabled" : "paused"}
+                        </span>
+                        <span className="text-[11px] text-muted-2">
+                          {s.cron_label}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-[11px] text-muted">
+                        next:{" "}
+                        <span className="text-foreground">
+                          {formatScheduleTimestamp(s.next_run_at)}
+                        </span>
+                        {s.last_run_at ? (
+                          <>
+                            {" · "}
+                            last:{" "}
+                            <span className="text-foreground">
+                              {formatScheduleTimestamp(s.last_run_at)}
+                            </span>{" "}
+                            (
+                            <span
+                              className={
+                                s.last_status === "ok"
+                                  ? "text-accent-2"
+                                  : "text-red"
+                              }
+                            >
+                              {s.last_status || "?"}
+                            </span>
+                            )
+                          </>
+                        ) : null}
+                      </p>
+                      {s.last_summary ? (
+                        <p className="mt-1 line-clamp-2 text-[11px] text-muted-2">
+                          ↳ {s.last_summary}
+                        </p>
+                      ) : null}
+                      {s.prompt ? (
+                        <p className="mt-1 text-[11px] text-muted-2">
+                          prompt:{" "}
+                          <code className="text-foreground">{s.prompt}</code>
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onToggle(s.id, !s.enabled)}
+                        disabled={scheduleBusy !== null}
+                        className="rounded border border-border px-2.5 py-1 text-[11px] text-muted hover:border-accent hover:text-accent disabled:opacity-50"
+                      >
+                        {rowBusy
+                          ? "…"
+                          : s.enabled
+                          ? "→ pause"
+                          : "→ enable"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDelete(s.id)}
+                        disabled={scheduleBusy !== null}
+                        className="rounded border border-border px-2.5 py-1 text-[11px] text-muted hover:border-red hover:text-red disabled:opacity-50"
+                      >
+                        delete
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          {atLimit ? (
+            <p className="text-[11px] text-muted">
+              At the {limit}-schedule limit. Pause or delete one to add another.
+            </p>
+          ) : (
+            <form
+              onSubmit={submit}
+              className="space-y-3 rounded border border-border bg-surface px-3 py-3"
+            >
+              <p className="text-[11px] uppercase tracking-widest text-muted-2">
+                + schedule a skill
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <label className="block">
+                  <span className="text-[11px] text-muted">skill</span>
+                  <select
+                    value={formSkill}
+                    onChange={(e) => setFormSkill(e.target.value)}
+                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+                  >
+                    {SCHEDULABLE_SKILLS.map((s) => (
+                      <option key={s.slug} value={s.slug}>
+                        {s.slug}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block">
+                  <span className="text-[11px] text-muted">frequency</span>
+                  <select
+                    value={formFreq}
+                    onChange={(e) =>
+                      setFormFreq(e.target.value as FreqKind)
+                    }
+                    className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+                  >
+                    <option value="hourly">hourly (top of each hour)</option>
+                    <option value="every6h">every 6 hours</option>
+                    <option value="daily">daily at HH:00 UTC</option>
+                    <option value="weekly">weekly · DOW @ HH:00 UTC</option>
+                  </select>
+                </label>
+                {formFreq === "daily" || formFreq === "weekly" ? (
+                  <label className="block">
+                    <span className="text-[11px] text-muted">hour (UTC)</span>
+                    <select
+                      value={formHour}
+                      onChange={(e) => setFormHour(parseInt(e.target.value, 10))}
+                      className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+                    >
+                      {HOURS_OF_DAY.map((h) => (
+                        <option key={h} value={h}>
+                          {String(h).padStart(2, "0")}:00
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+                {formFreq === "weekly" ? (
+                  <label className="block">
+                    <span className="text-[11px] text-muted">day of week</span>
+                    <select
+                      value={formDow}
+                      onChange={(e) => setFormDow(parseInt(e.target.value, 10))}
+                      className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-foreground"
+                    >
+                      {DAYS_OF_WEEK.map((d) => (
+                        <option key={d.value} value={d.value}>
+                          {d.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : null}
+              </div>
+              <label className="block">
+                <span className="text-[11px] text-muted">
+                  prompt (optional · sent to skill at run time)
+                </span>
+                <input
+                  type="text"
+                  value={formPrompt}
+                  onChange={(e) => setFormPrompt(e.target.value)}
+                  placeholder="leave blank to use the skill's default"
+                  maxLength={500}
+                  className="mt-1 w-full rounded border border-border bg-background px-2 py-1.5 text-sm text-foreground placeholder:text-muted-2"
+                />
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="submit"
+                  disabled={scheduleBusy !== null}
+                  className="rounded border border-accent bg-accent/10 px-3 py-1.5 text-sm text-accent hover:bg-accent/20 disabled:opacity-50"
+                >
+                  {scheduleBusy === "create" ? "saving…" : "→ save schedule"}
+                </button>
+                <p className="text-[11px] text-muted">
+                  runs in the background · output stored in memory for `run`
+                </p>
+              </div>
+            </form>
+          )}
+
+          <p className="text-[11px] leading-relaxed text-muted-2">
+            How it works: a Cloudflare Cron Trigger fires every {tick} minutes.
+            The worker queries due schedules and executes them via the same
+            path <code>$ aeon run</code> uses. Output is appended to your
+            per-skill memory so the next interactive run sees what the cron
+            produced. Pausing keeps the row; deleting removes it.
           </p>
         </div>
       )}
