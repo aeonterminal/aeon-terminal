@@ -120,7 +120,7 @@ const SKILL_REGISTRY = {
     name: "on-chain-monitor",
     summary: "Watches wallets, contracts, and flows for material moves on Base.",
     persona:
-      "Expect an Ethereum/Base wallet address (0x followed by 40 hex chars) in the prompt. If absent or malformed, reply in one line asking for an address. Steps: 1) fetch_url https://base.blockscout.com/api/v2/addresses/<addr> to get balance + tx_count + last activity. 2) fetch_url https://base.blockscout.com/api/v2/addresses/<addr>/transactions?filter=to%20%7C%20from to get recent transactions. Output header 'on-chain-monitor · <addr first 6>…<addr last 4> · base'. Then a line 'balance · <coin_balance / 1e18 to 4 decimals> ETH · <transactions_count> total tx · first seen <block_number_of_first_transaction or first tx timestamp YYYY-MM-DD>'. Then 'recent (up to 5):' followed by up to 5 lines '<HH:MM dd Mon> · <method or \"transfer\"> · <value / 1e18 ETH or \"—\"> · → <to address short>'. End with one one-line activity read: 'activity · high' (tx in last 24h), 'activity · medium' (last 7d), 'activity · low' (last 30d), 'activity · dormant' (>30d). If the address returns 404 or empty, say 'no activity on Base' honestly in one line.",
+      "Expect an Ethereum/Base wallet address (0x followed by 40 hex chars) in the prompt. If absent or malformed, reply in one line asking for an address. Steps: 1) fetch_url https://base.blockscout.com/api/v2/addresses/<addr> — JSON response has `coin_balance` (string, wei), `transactions_count` (number), and may have `creation_tx_hash`. 2) fetch_url https://base.blockscout.com/api/v2/addresses/<addr>/transactions (NO query params — the bare endpoint returns recent tx; the `filter` parameter often returns 422). JSON response has `items` (array, newest first). Each item has `timestamp` (ISO string), `method` (string or null), `value` (string, wei), `to` (object with `hash` field, may be null for contract creation), and `hash`. Output header 'on-chain-monitor · <addr first 6>…<addr last 4> · base'. Then a line 'balance · <coin_balance / 1e18 to 4 decimals> ETH · <transactions_count> total tx'. Then ALWAYS emit a 'recent (up to 5):' header — never skip this section. If items[] has entries, follow with up to 5 lines from items[0..4]: '<timestamp formatted HH:MM dd Mon> · <method or \"transfer\"> · <value / 1e18 ETH to 4 decimals, or \"—\" if value is \"0\"> · → <to.hash first 6>…<to.hash last 4, or \"contract\" if to is null>'. If the transactions endpoint returned non-200, no items, or parsing fails, emit exactly ONE line under the header: '— could not retrieve recent transactions'. End with one one-line activity read based on items[0].timestamp: 'activity · high' (last 24h), 'activity · medium' (last 7d), 'activity · low' (last 30d), 'activity · dormant' (>30d or no recent data). If the address endpoint itself returns 404 or empty, say 'no activity on Base' honestly in one line and stop.",
   },
   "defi-monitor": {
     name: "defi-monitor",
@@ -221,7 +221,7 @@ const SKILL_REGISTRY = {
     summary:
       "A signal-of-life ping so you know agents are alive and the wiring works. Snapshot of /api/status.",
     persona:
-      "Call fetch_url on https://aeonterminal.org/api/status to get the live infra + usage snapshot (JSON with `infra` object, `usage` object, and `skills` array). Output header 'heartbeat · <generated_at from response, sliced to HH:MM UTC>'. Then two sections:\n'infra:' — one line per probe in the infra object, format '<name> · <ok|down> · <latency_ms>ms'. Names typically include d1, base_rpc, dexscreener, github.\n'usage:' — one line: '<asks_today> asks · <runs_today> runs · <users_total> users · <wallets_linked> wallets · <skill_runs_today> skill runs · <schedules_active> schedules'.\nEnd with one one-line read counting infra failures: 'pulse · all systems ok' if zero down, else 'pulse · <n> probe(s) degraded'. If the api call itself fails or returns non-200, say so honestly in one line and stop.",
+      "Call the aeon_status tool (no arguments) to get the live infra + usage snapshot. JSON response has `now_iso` (ISO timestamp), `probes` (object keyed by probe name d1, base_rpc, dexscreener, github — each entry has `ok: boolean` and `latency_ms: number`), `counters` (asks_today, runs_today, users_total, users_24h, wallets_linked, active_today), and `skills` (total, live, coming_soon). Output header 'heartbeat · <now_iso sliced to HH:MM UTC>'. Then two sections:\n'infra:' — one line per key in probes, format '<name> · <ok|down> · <latency_ms>ms'.\n'usage:' — one line: '<counters.asks_today> asks · <counters.runs_today> runs · <counters.users_total> users · <counters.wallets_linked> wallets · <counters.active_today> active today · <skills.live>/<skills.total> skills live'.\nEnd with one one-line read counting infra failures: 'pulse · all systems ok' if zero `ok:false` probes, else 'pulse · <n> probe(s) degraded'. If the tool call itself errors, say so honestly in one line and stop.",
   },
   "skill-repair": {
     name: "skill-repair",
@@ -325,6 +325,15 @@ const TOOLS_SPEC = [
         },
       },
       required: ["url"],
+    },
+  },
+  {
+    name: "aeon_status",
+    description:
+      "Get the current Aeon Terminal infra + usage snapshot (D1 / Base RPC / Dexscreener / GitHub health probes, asks/runs/users/wallets counters, and live skill count). Returns the same JSON payload as the public /api/status endpoint but resolved in-worker so Cloudflare doesn't reject the self-hostname fetch. No parameters.",
+    input_schema: {
+      type: "object",
+      properties: {},
     },
   },
 ];
@@ -588,7 +597,31 @@ async function toolReadRss(input) {
 async function runTool(name, input, env) {
   if (name === "fetch_url") return toolFetchUrl(input, env);
   if (name === "read_rss") return toolReadRss(input);
+  if (name === "aeon_status") return toolAeonStatus(env);
   return { content: `unknown tool: ${name}`, isError: true, summary: "unknown tool" };
+}
+
+// Internal-only tool. Resolves /api/status data directly inside the worker
+// instead of HTTP-fetching aeonterminal.org, which Cloudflare rejects as a
+// self-hostname loop (HTTP 522 at the edge before the request even reaches us).
+async function toolAeonStatus(env) {
+  try {
+    const snapshot = await getStatusSnapshot(env);
+    const probeSummary = Object.entries(snapshot.probes)
+      .map(([k, v]) => `${k}=${v.ok ? "ok" : "down"}`)
+      .join(",");
+    return {
+      content: JSON.stringify(snapshot),
+      summary: `probes ${probeSummary} \u00b7 ${snapshot.counters.runs_today} runs today`,
+    };
+  } catch (err) {
+    const msg = err && err.message ? err.message : String(err);
+    return {
+      content: `status error: ${msg}`,
+      isError: true,
+      summary: `failed: ${msg.slice(0, 40)}`,
+    };
+  }
 }
 
 // --- streaming ---
@@ -3996,6 +4029,26 @@ async function handleStatus(request, env) {
   if (request.method !== "GET") {
     return json({ error: "method_not_allowed" }, { status: 405 });
   }
+  const payload = await getStatusSnapshot(env);
+
+  // Use the shared json() helper so we inherit CORS headers — without these,
+  // any cross-origin consumer (third-party monitoring, embed widgets) would
+  // be blocked by the browser even though the endpoint is unauthenticated.
+  return json(payload, {
+    headers: {
+      // Edge-cache 30s, allow stale for 60s while revalidating
+      "cache-control":
+        "public, max-age=30, s-maxage=30, stale-while-revalidate=60",
+    },
+  });
+}
+
+// Builds the snapshot payload returned by /api/status. Factored out of
+// handleStatus so the worker can call it directly (e.g. from the aeon_status
+// tool used by the heartbeat skill) without round-tripping through HTTP to
+// its own public hostname — Cloudflare rejects worker→own-host fetches with
+// HTTP 522 at the edge.
+async function getStatusSnapshot(env) {
   const startedAt = Date.now();
   const now = nowSec();
   const today = utcDay(now);
@@ -4140,17 +4193,7 @@ async function handleStatus(request, env) {
     },
     took_ms: Date.now() - startedAt,
   };
-
-  // Use the shared json() helper so we inherit CORS headers — without these,
-  // any cross-origin consumer (third-party monitoring, embed widgets) would
-  // be blocked by the browser even though the endpoint is unauthenticated.
-  return json(payload, {
-    headers: {
-      // Edge-cache 30s, allow stale for 60s while revalidating
-      "cache-control":
-        "public, max-age=30, s-maxage=30, stale-while-revalidate=60",
-    },
-  });
+  return payload;
 }
 
 async function handleMemory(request, env) {
