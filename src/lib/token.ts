@@ -64,6 +64,15 @@ export const UTILITIES: readonly TokenUtility[] = [
     status: "live",
   },
   {
+    slug: "scheduled-runs",
+    title: "Scheduled skill runs",
+    summary:
+      "Wire a skill to a cron — daily morning brief, hourly monitor, weekly digest. Output lands in memory.",
+    detail:
+      "Cloudflare Cron Triggers fire the worker every 15 min. The scheduled() handler picks up due rows from user_schedules and runs each through the same path /api/exec uses — same model, same tools, same memory. Paid + holder tier gets 3 schedules each. Free tier sees the section disabled with a clear 'hold to unlock' hint. Hourly / every6h / daily@H / weekly@DOW@H presets are exposed in /account; output stashes into per-skill memory so the next interactive run sees what the cron produced.",
+    status: "live",
+  },
+  {
     slug: "stripe-billing",
     title: "Paid plan via Stripe",
     summary:

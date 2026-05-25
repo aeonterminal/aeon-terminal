@@ -1118,6 +1118,28 @@ async function ensureSchema(env) {
       updated_at INTEGER NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS idx_user_subs_customer ON user_subscriptions(stripe_customer_id)`,
+    // Scheduled skill runs. Cloudflare Cron Triggers fire one worker-wide
+    // entrypoint every N minutes; the scheduled() handler queries this table
+    // for any row where enabled = 1 AND next_run_at <= now, runs each due
+    // skill, persists output to memory_runs, then updates next_run_at via
+    // the cron pattern. Per-user state, per-row quota (free = 0,
+    // paid/holder = MAX_SCHEDULES_PER_USER).
+    `CREATE TABLE IF NOT EXISTS user_schedules (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      skill TEXT NOT NULL,
+      prompt TEXT NOT NULL DEFAULT '',
+      cron TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      next_run_at INTEGER NOT NULL,
+      last_run_at INTEGER,
+      last_status TEXT,
+      last_summary TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_user_schedules_user ON user_schedules(user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_user_schedules_due ON user_schedules(enabled, next_run_at)`,
   ];
   for (const sql of statements) {
     await env.DB.prepare(sql).run();
@@ -2500,6 +2522,547 @@ async function handleStripeEvent(env, event) {
   }
 }
 
+// --- API: /api/schedules (cron-triggered skill runs) ---
+//
+// Cloudflare Cron Triggers fire one worker entrypoint every 15 minutes (see
+// wrangler.toml [triggers]). The scheduled() handler queries user_schedules
+// for any row where enabled = 1 AND next_run_at <= now, runs each due skill
+// in the same path handleExec uses, persists output to memory_runs, and
+// advances next_run_at via the cron preset.
+//
+// Quota: paid/holder tier gets MAX_SCHEDULES_PER_USER schedules, free tier
+// gets 0 (with an honest "upgrade or hold tokens" UI). Schedules can be
+// disabled (kept in the row) without deletion.
+
+const MAX_SCHEDULES_PER_USER = 3;
+const SCHEDULE_CRON_TICK_MIN = 15; // matches wrangler.toml */15 trigger
+const SCHEDULE_MAX_PROMPT = 500;
+const SCHEDULE_RUN_TIMEOUT_MS = 25_000; // hard cap so one run doesn't block others
+
+// Preset cron forms accepted by the API. We normalize to a small set of
+// presets rather than accept raw 5-field cron strings: simpler to validate,
+// simpler to humanize, and the cron tick is every 15 min anyway so finer
+// granularity wouldn't even fire.
+//
+// Forms:
+//   hourly             -> at minute 0 of every hour
+//   every6h            -> at 00:00, 06:00, 12:00, 18:00 UTC
+//   daily@<H>          -> daily at <H>:00 UTC, H in [0..23]
+//   weekly@<DOW>@<H>   -> weekly on day-of-week <DOW> (0=Sun..6=Sat) at <H>:00 UTC
+function validateSchedulePreset(input) {
+  if (typeof input !== "string") return null;
+  const s = input.trim().toLowerCase();
+  if (s === "hourly" || s === "every6h") return s;
+  let m = s.match(/^daily@(\d{1,2})$/);
+  if (m) {
+    const h = parseInt(m[1], 10);
+    if (h >= 0 && h <= 23) return `daily@${h}`;
+  }
+  m = s.match(/^weekly@(\d)@(\d{1,2})$/);
+  if (m) {
+    const dow = parseInt(m[1], 10);
+    const h = parseInt(m[2], 10);
+    if (dow >= 0 && dow <= 6 && h >= 0 && h <= 23) {
+      return `weekly@${dow}@${h}`;
+    }
+  }
+  return null;
+}
+
+// Does the preset fire at the given UTC top-of-hour Date?
+function presetMatchesHour(preset, date) {
+  if (date.getUTCMinutes() !== 0) return false;
+  if (preset === "hourly") return true;
+  if (preset === "every6h") {
+    return [0, 6, 12, 18].includes(date.getUTCHours());
+  }
+  let m = preset.match(/^daily@(\d{1,2})$/);
+  if (m) return date.getUTCHours() === parseInt(m[1], 10);
+  m = preset.match(/^weekly@(\d)@(\d{1,2})$/);
+  if (m) {
+    return (
+      date.getUTCDay() === parseInt(m[1], 10) &&
+      date.getUTCHours() === parseInt(m[2], 10)
+    );
+  }
+  return false;
+}
+
+// Returns the next firing Unix-second timestamp strictly > fromSec for the
+// preset. Iterates hour-by-hour up to 8 days out (safety bound). Simple and
+// trivially correct for all supported presets; the wall-clock cost is
+// negligible (≤ 192 cheap Date ops). Returns +30d for unknown presets so
+// they never accidentally fire.
+function computeNextRunAt(preset, fromSec) {
+  const fromMs = fromSec * 1000;
+  // Start at the top of the next hour. "+60s" guarantees we always advance
+  // past the current minute, even if fromSec is exactly at minute 0.
+  const candidate = new Date((fromSec + 60) * 1000);
+  candidate.setUTCSeconds(0, 0);
+  candidate.setUTCMinutes(0);
+  if (candidate.getTime() <= fromMs) {
+    candidate.setUTCHours(candidate.getUTCHours() + 1);
+  }
+  const maxIters = 8 * 24; // 8 days worth of hours
+  for (let i = 0; i < maxIters; i++) {
+    if (presetMatchesHour(preset, candidate)) {
+      return Math.floor(candidate.getTime() / 1000);
+    }
+    candidate.setUTCHours(candidate.getUTCHours() + 1);
+  }
+  return fromSec + 30 * 86400;
+}
+
+function humanizeSchedulePreset(preset) {
+  if (preset === "hourly") return "every hour";
+  if (preset === "every6h") return "every 6 hours";
+  let m = preset.match(/^daily@(\d{1,2})$/);
+  if (m) {
+    const h = String(parseInt(m[1], 10)).padStart(2, "0");
+    return `daily at ${h}:00 UTC`;
+  }
+  m = preset.match(/^weekly@(\d)@(\d{1,2})$/);
+  if (m) {
+    const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const h = String(parseInt(m[2], 10)).padStart(2, "0");
+    return `weekly · ${days[parseInt(m[1], 10)]} ${h}:00 UTC`;
+  }
+  return preset;
+}
+
+// Skills that can be scheduled. Custom skills + holder-only skills are
+// allowed (holder gate runs at execute time anyway); coming-soon skills
+// are not (no real backend to run).
+function isSchedulableCatalogSkill(slug) {
+  const reg = SKILL_REGISTRY[slug];
+  if (!reg) return false;
+  if (reg.comingSoon) return false;
+  return true;
+}
+
+function serializeSchedule(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    skill: row.skill,
+    prompt: row.prompt || "",
+    cron: row.cron,
+    cron_label: humanizeSchedulePreset(row.cron),
+    enabled: !!row.enabled,
+    next_run_at: row.next_run_at,
+    last_run_at: row.last_run_at,
+    last_status: row.last_status,
+    last_summary: row.last_summary,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+// --- D1: schedules ---
+
+async function dbListSchedules(env, userId) {
+  const res = await env.DB
+    .prepare(
+      `SELECT id, user_id, skill, prompt, cron, enabled, next_run_at,
+              last_run_at, last_status, last_summary, created_at, updated_at
+         FROM user_schedules WHERE user_id = ?
+         ORDER BY created_at ASC`,
+    )
+    .bind(userId)
+    .all();
+  return res.results || [];
+}
+
+async function dbCountSchedules(env, userId) {
+  const row = await env.DB
+    .prepare(`SELECT COUNT(*) AS c FROM user_schedules WHERE user_id = ?`)
+    .bind(userId)
+    .first();
+  return row ? Number(row.c || 0) : 0;
+}
+
+async function dbInsertSchedule(env, row) {
+  await env.DB
+    .prepare(
+      `INSERT INTO user_schedules
+         (id, user_id, skill, prompt, cron, enabled, next_run_at,
+          last_run_at, last_status, last_summary, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, NULL, NULL, NULL, ?, ?)`,
+    )
+    .bind(
+      row.id,
+      row.user_id,
+      row.skill,
+      row.prompt || "",
+      row.cron,
+      row.next_run_at,
+      row.created_at,
+      row.created_at,
+    )
+    .run();
+}
+
+async function dbGetSchedule(env, id, userId) {
+  return env.DB
+    .prepare(
+      `SELECT id, user_id, skill, prompt, cron, enabled, next_run_at,
+              last_run_at, last_status, last_summary, created_at, updated_at
+         FROM user_schedules WHERE id = ? AND user_id = ?`,
+    )
+    .bind(id, userId)
+    .first();
+}
+
+async function dbSetScheduleEnabled(env, id, userId, enabled) {
+  const ts = nowSec();
+  const res = await env.DB
+    .prepare(
+      `UPDATE user_schedules SET enabled = ?, updated_at = ?
+         WHERE id = ? AND user_id = ?`,
+    )
+    .bind(enabled ? 1 : 0, ts, id, userId)
+    .run();
+  return !!(res && res.meta && (res.meta.changes || 0) > 0);
+}
+
+async function dbDeleteSchedule(env, id, userId) {
+  const res = await env.DB
+    .prepare(`DELETE FROM user_schedules WHERE id = ? AND user_id = ?`)
+    .bind(id, userId)
+    .run();
+  return !!(res && res.meta && (res.meta.changes || 0) > 0);
+}
+
+async function dbListDueSchedules(env, nowTs) {
+  const res = await env.DB
+    .prepare(
+      `SELECT id, user_id, skill, prompt, cron, enabled, next_run_at,
+              last_run_at, last_status, last_summary, created_at, updated_at
+         FROM user_schedules
+        WHERE enabled = 1 AND next_run_at <= ?
+        ORDER BY next_run_at ASC
+        LIMIT 50`,
+    )
+    .bind(nowTs)
+    .all();
+  return res.results || [];
+}
+
+async function dbRecordScheduleRun(env, id, { ranAt, status, summary, nextRunAt }) {
+  await env.DB
+    .prepare(
+      `UPDATE user_schedules
+          SET last_run_at = ?, last_status = ?, last_summary = ?,
+              next_run_at = ?, updated_at = ?
+        WHERE id = ?`,
+    )
+    .bind(ranAt, status, summary || null, nextRunAt, ranAt, id)
+    .run();
+}
+
+async function handleSchedules(request, env) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS });
+  }
+  if (!hasDb(env)) return json({ error: "db_not_configured" }, { status: 503 });
+  await ensureSchema(env);
+
+  const user = await currentUser(request, env);
+  if (!user) return json({ error: "sign_in_required" }, { status: 401 });
+
+  const url = new URL(request.url);
+  const path = url.pathname;
+
+  if (path === "/api/schedules" && request.method === "GET") {
+    let tier;
+    try {
+      tier = await resolveUserTier(env, user);
+    } catch {
+      tier = { tier: user.plan === "paid" ? "paid" : "free", source: "plan" };
+    }
+    const rows = await dbListSchedules(env, user.id);
+    return json({
+      schedules: rows.map((r) => serializeSchedule(r)),
+      limit: tier.tier === "paid" ? MAX_SCHEDULES_PER_USER : 0,
+      tier: tier.tier,
+      tier_source: tier.source,
+      cron_tick_min: SCHEDULE_CRON_TICK_MIN,
+    });
+  }
+
+  if (path === "/api/schedules" && request.method === "POST") {
+    let tier;
+    try {
+      tier = await resolveUserTier(env, user);
+    } catch {
+      tier = { tier: user.plan === "paid" ? "paid" : "free", source: "plan" };
+    }
+    if (tier.tier !== "paid") {
+      return json(
+        {
+          error: "paid_only",
+          message:
+            "Scheduled runs are a paid feature. Hold $aeonterminal or subscribe to unlock.",
+        },
+        { status: 403 },
+      );
+    }
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "bad_json" }, { status: 400 });
+    }
+    const skill = typeof body.skill === "string" ? body.skill.trim() : "";
+    const prompt = String(body.prompt ?? "").slice(0, SCHEDULE_MAX_PROMPT).trim();
+    const preset = validateSchedulePreset(body.cron);
+    if (!skill) return json({ error: "missing_skill" }, { status: 400 });
+    if (!isSchedulableCatalogSkill(skill)) {
+      // Allow custom skills owned by the user.
+      const ownsCustom = await dbGetUserSkillBySlug(env, user.id, skill);
+      if (!ownsCustom) {
+        return json({ error: "unknown_or_unrunnable_skill" }, { status: 400 });
+      }
+    }
+    if (!preset) return json({ error: "invalid_cron" }, { status: 400 });
+
+    const count = await dbCountSchedules(env, user.id);
+    if (count >= MAX_SCHEDULES_PER_USER) {
+      return json(
+        {
+          error: "limit_reached",
+          message: `You can have up to ${MAX_SCHEDULES_PER_USER} schedules. Delete one first.`,
+          limit: MAX_SCHEDULES_PER_USER,
+        },
+        { status: 409 },
+      );
+    }
+
+    const now = nowSec();
+    const row = {
+      id: newToken().slice(0, 24),
+      user_id: user.id,
+      skill,
+      prompt,
+      cron: preset,
+      next_run_at: computeNextRunAt(preset, now),
+      created_at: now,
+    };
+    await dbInsertSchedule(env, row);
+    const inserted = await dbGetSchedule(env, row.id, user.id);
+    return json({ schedule: serializeSchedule(inserted) }, { status: 201 });
+  }
+
+  // /api/schedules/:id  -- PATCH (toggle enabled) or DELETE
+  const m = path.match(/^\/api\/schedules\/([A-Za-z0-9_-]{8,64})$/);
+  if (m) {
+    const id = m[1];
+    if (request.method === "DELETE") {
+      const ok = await dbDeleteSchedule(env, id, user.id);
+      if (!ok) return json({ error: "not_found" }, { status: 404 });
+      return json({ ok: true });
+    }
+    if (request.method === "PATCH") {
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return json({ error: "bad_json" }, { status: 400 });
+      }
+      if (typeof body.enabled !== "boolean") {
+        return json({ error: "missing_enabled" }, { status: 400 });
+      }
+      const ok = await dbSetScheduleEnabled(env, id, user.id, body.enabled);
+      if (!ok) return json({ error: "not_found" }, { status: 404 });
+      const updated = await dbGetSchedule(env, id, user.id);
+      // Re-anchor next_run_at when re-enabling so we don't fire historic
+      // backlog the moment a schedule wakes up.
+      if (body.enabled && updated && updated.next_run_at < nowSec()) {
+        const next = computeNextRunAt(updated.cron, nowSec());
+        await env.DB
+          .prepare(
+            `UPDATE user_schedules SET next_run_at = ?, updated_at = ? WHERE id = ?`,
+          )
+          .bind(next, nowSec(), id)
+          .run();
+        updated.next_run_at = next;
+      }
+      return json({ schedule: serializeSchedule(updated) });
+    }
+    return json({ error: "method_not_allowed" }, { status: 405 });
+  }
+
+  return json({ error: "not_found" }, { status: 404 });
+}
+
+// Run a single skill non-streaming. Used by scheduled() — same path that
+// handleExec uses, minus the SSE wire. Returns { ok, text, error }.
+async function runSkillBatch(env, { user, skill, prompt, customSkill }) {
+  if (!env.ANTHROPIC_API_KEY) {
+    return { ok: false, error: "anthropic_not_configured" };
+  }
+  const mode = "run";
+  const effectiveSkillKey = customSkill ? `u:${customSkill.id}` : skill;
+  const mem = await dbGetMemory(env, user.id).catch(() => ({
+    turns: [],
+    runs: [],
+  }));
+  let system = buildSystem(skill, mode, customSkill);
+  system = appendRunContext(system, mem.runs, effectiveSkillKey);
+  const messages = [{ role: "user", content: prompt }];
+  const MAX_ITERS = 5;
+  let finalText = "";
+  let stopReason = null;
+  try {
+    for (let iter = 0; iter < MAX_ITERS; iter++) {
+      const upstream = await callAnthropic(env, system, messages);
+      if (!upstream.ok || !upstream.body) {
+        const errText = await upstream.text().catch(() => "");
+        return {
+          ok: false,
+          error: `upstream_${upstream.status}: ${errText.slice(0, 120)}`,
+        };
+      }
+      const { stopReason: sr, contentBlocks } = await parseStream(
+        upstream,
+        () => {},
+      );
+      stopReason = sr;
+      for (const block of contentBlocks) {
+        if (block.type === "text" && block.text) finalText += block.text;
+      }
+      if (stopReason !== "tool_use") {
+        if (user && hasDb(env) && finalText) {
+          try {
+            await dbAppendRun(env, user.id, effectiveSkillKey, prompt, finalText);
+          } catch {
+            // best-effort
+          }
+        }
+        return { ok: true, text: finalText };
+      }
+      messages.push({ role: "assistant", content: contentBlocks });
+      const toolResults = [];
+      for (const block of contentBlocks) {
+        if (block.type !== "tool_use") continue;
+        const result = await runTool(block.name, block.input, env);
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: result.content,
+          is_error: result.isError === true,
+        });
+      }
+      messages.push({ role: "user", content: toolResults });
+    }
+    return { ok: false, error: "max_iterations" };
+  } catch (err) {
+    return {
+      ok: false,
+      error: (err && err.message ? err.message : String(err)).slice(0, 200),
+    };
+  }
+}
+
+// Cron entrypoint. Picks up due schedules and runs them. Designed to be
+// safe under repeated triggers — if the previous tick already advanced
+// next_run_at past `now`, this tick is a no-op. Bounded by LIMIT 50 in
+// dbListDueSchedules + per-run timeout so one slow LLM call can't block
+// the rest of the queue indefinitely.
+async function runScheduledTick(env) {
+  if (!hasDb(env)) return { ok: false, error: "no_db" };
+  await ensureSchema(env);
+  const tickStart = nowSec();
+  const due = await dbListDueSchedules(env, tickStart);
+  let ran = 0;
+  let failed = 0;
+  for (const row of due) {
+    const user = await env.DB
+      .prepare(
+        `SELECT id, email, name, avatar_url, primary_provider, plan
+           FROM users WHERE id = ?`,
+      )
+      .bind(row.user_id)
+      .first();
+    if (!user) {
+      // Orphaned schedule — disable so it doesn't keep retrying.
+      await env.DB
+        .prepare(`UPDATE user_schedules SET enabled = 0 WHERE id = ?`)
+        .bind(row.id)
+        .run();
+      continue;
+    }
+    // Re-resolve tier so we don't keep running for downgraded users.
+    let tier;
+    try {
+      tier = await resolveUserTier(env, user);
+    } catch {
+      tier = { tier: user.plan === "paid" ? "paid" : "free", source: "plan" };
+    }
+    if (tier.tier !== "paid") {
+      // User no longer eligible; disable schedule (they can re-enable when
+      // they upgrade/hold again).
+      await env.DB
+        .prepare(
+          `UPDATE user_schedules SET enabled = 0,
+                last_status = 'tier_lost', last_summary = 'paid tier lost',
+                updated_at = ? WHERE id = ?`,
+        )
+        .bind(nowSec(), row.id)
+        .run();
+      continue;
+    }
+    // Resolve catalog vs custom skill.
+    let customSkill = null;
+    if (!SKILL_REGISTRY[row.skill]) {
+      customSkill = await dbGetUserSkillBySlug(env, user.id, row.skill);
+    }
+    const runPrompt =
+      row.prompt && row.prompt.trim()
+        ? row.prompt
+        : `Run ${row.skill}.`;
+    const ranAt = nowSec();
+    let result;
+    try {
+      // Race the run against a hard timeout so a single hanging upstream
+      // doesn't block every other due schedule.
+      result = await Promise.race([
+        runSkillBatch(env, {
+          user,
+          skill: row.skill,
+          prompt: runPrompt,
+          customSkill,
+        }),
+        new Promise((resolve) =>
+          setTimeout(
+            () => resolve({ ok: false, error: "timeout" }),
+            SCHEDULE_RUN_TIMEOUT_MS,
+          ),
+        ),
+      ]);
+    } catch (err) {
+      result = {
+        ok: false,
+        error: (err && err.message ? err.message : String(err)).slice(0, 200),
+      };
+    }
+    const status = result.ok ? "ok" : "error";
+    const summary = result.ok
+      ? String(result.text || "").slice(0, 240)
+      : `error: ${String(result.error || "unknown").slice(0, 220)}`;
+    const nextRunAt = computeNextRunAt(row.cron, ranAt);
+    await dbRecordScheduleRun(env, row.id, {
+      ranAt,
+      status,
+      summary,
+      nextRunAt,
+    });
+    if (result.ok) ran += 1;
+    else failed += 1;
+  }
+  return { ok: true, ran, failed, picked: due.length };
+}
+
 // --- D1: OAuth state ---
 
 async function dbStoreOAuthState(env, state, provider, codeVerifier, redirectTo) {
@@ -3451,6 +4014,9 @@ const worker = {
         path === "/api/billing/portal" || path === "/api/billing/webhook") {
       return handleBilling(request, env);
     }
+    if (path === "/api/schedules" || path.startsWith("/api/schedules/")) {
+      return handleSchedules(request, env);
+    }
 
     // Brand subdomains: redirect to canonical apex so we have one source of truth.
     const hostRule = HOST_REDIRECTS[url.hostname];
@@ -3459,6 +4025,18 @@ const worker = {
     }
 
     return env.ASSETS.fetch(request);
+  },
+  // Cloudflare Cron Triggers entrypoint. See wrangler.toml [triggers] —
+  // fires every 15 minutes UTC. Inside runScheduledTick we query D1 for
+  // any due schedule and execute it. ctx.waitUntil keeps the worker alive
+  // past the cron event for the duration of the LLM calls.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      runScheduledTick(env).catch(() => {
+        // tick errors are logged via Cloudflare's automatic cron logs;
+        // intentionally swallowed here so the trigger doesn't retry.
+      }),
+    );
   },
 };
 

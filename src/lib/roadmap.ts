@@ -75,7 +75,8 @@ export const ROADMAP: readonly RoadmapPhase[] = [
       },
       {
         label: "scheduled skill runs",
-        detail: "cloudflare cron triggers · per-skill schedule from the catalog",
+        detail:
+          "shipped · cloudflare cron triggers fire every 15 min · paid/holder users wire up to 3 schedules (hourly · every6h · daily@H · weekly@DOW@H) from /account · output stashes into per-skill memory",
       },
       {
         label: "rate limit transparency",
