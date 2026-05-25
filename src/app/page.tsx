@@ -109,9 +109,6 @@ export default function HomePage() {
             <TerminalWindow title="aeon@local" host="~/agents/me">
               <HeroTerminal />
             </TerminalWindow>
-            <p className="mt-3 text-center text-[11px] text-muted-2">
-              live demo · types itself · safe to ignore
-            </p>
           </div>
         </div>
       </section>
