@@ -680,6 +680,201 @@ async function parseStream(response, onTextDelta) {
   return { stopReason, contentBlocks: blocks.filter(Boolean) };
 }
 
+// --- Virtuals (OpenAI-compatible) provider ---
+//
+// compute.virtuals.io exposes an OpenAI-compatible /v1/chat/completions
+// endpoint. Internal message + tool format stays Anthropic-shaped (so the
+// tool-use loop in handleExec / runSkillBatch doesn't need to know about
+// providers); we translate on the way out and back.
+
+const VIRTUALS_DEFAULT_MODEL = "moonshotai/kimi-k2-0905";
+
+function virtualsToolsSpec() {
+  return TOOLS_SPEC.map((t) => ({
+    type: "function",
+    function: {
+      name: t.name,
+      description: t.description,
+      parameters: t.input_schema,
+    },
+  }));
+}
+
+// Convert Anthropic-shaped messages into OpenAI chat-completion messages.
+// Inputs we may see:
+//   { role: "user"|"assistant", content: string }
+//   { role: "assistant", content: [{type:"text",text}, {type:"tool_use",id,name,input}, ...] }
+//   { role: "user", content: [{type:"tool_result",tool_use_id,content,is_error}, ...] }
+function virtualsConvertMessages(system, messages) {
+  const out = [];
+  if (system) out.push({ role: "system", content: system });
+  for (const m of messages) {
+    if (typeof m.content === "string") {
+      out.push({ role: m.role, content: m.content });
+      continue;
+    }
+    if (!Array.isArray(m.content)) continue;
+    if (m.role === "assistant") {
+      let text = "";
+      const toolCalls = [];
+      for (const block of m.content) {
+        if (block.type === "text") text += block.text ?? "";
+        else if (block.type === "tool_use") {
+          toolCalls.push({
+            id: block.id,
+            type: "function",
+            function: {
+              name: block.name,
+              arguments: JSON.stringify(block.input ?? {}),
+            },
+          });
+        }
+      }
+      const msg = { role: "assistant", content: text };
+      if (toolCalls.length > 0) msg.tool_calls = toolCalls;
+      out.push(msg);
+    } else if (m.role === "user") {
+      // tool_result blocks become individual { role: "tool" } messages.
+      for (const block of m.content) {
+        if (block.type !== "tool_result") continue;
+        out.push({
+          role: "tool",
+          tool_call_id: block.tool_use_id,
+          content:
+            typeof block.content === "string"
+              ? block.content
+              : JSON.stringify(block.content ?? ""),
+        });
+      }
+    }
+  }
+  return out;
+}
+
+async function callVirtuals(env, system, messages) {
+  const model = env.VIRTUALS_MODEL || VIRTUALS_DEFAULT_MODEL;
+  return fetch("https://compute.virtuals.io/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${env.VIRTUALS_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 2048,
+      stream: true,
+      tools: virtualsToolsSpec(),
+      messages: virtualsConvertMessages(system, messages),
+    }),
+  });
+}
+
+// Parses one streaming OpenAI-style response and returns Anthropic-shaped
+// { stopReason, contentBlocks } so the existing tool-use loop is unchanged.
+async function parseVirtualsStream(response, onTextDelta) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let textBuf = "";
+  const toolCalls = []; // [{ id, name, argsBuf }]
+  let finishReason = null;
+  let buf = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload || payload === "[DONE]") continue;
+      let evt;
+      try {
+        evt = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+      const choice = evt.choices?.[0];
+      if (!choice) continue;
+      const delta = choice.delta ?? {};
+      if (typeof delta.content === "string" && delta.content.length > 0) {
+        textBuf += delta.content;
+        await onTextDelta(delta.content);
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const idx = tc.index ?? 0;
+          if (!toolCalls[idx]) {
+            toolCalls[idx] = { id: "", name: "", argsBuf: "" };
+          }
+          if (tc.id) toolCalls[idx].id = tc.id;
+          if (tc.function?.name) toolCalls[idx].name = tc.function.name;
+          if (typeof tc.function?.arguments === "string") {
+            toolCalls[idx].argsBuf += tc.function.arguments;
+          }
+        }
+      }
+      if (choice.finish_reason) finishReason = choice.finish_reason;
+    }
+  }
+
+  const contentBlocks = [];
+  if (textBuf) contentBlocks.push({ type: "text", text: textBuf });
+  for (const tc of toolCalls) {
+    if (!tc || !tc.name) continue;
+    let input;
+    try {
+      input = JSON.parse(tc.argsBuf || "{}");
+    } catch {
+      input = {};
+    }
+    contentBlocks.push({
+      type: "tool_use",
+      id: tc.id || `call_${Math.random().toString(36).slice(2, 10)}`,
+      name: tc.name,
+      input,
+    });
+  }
+
+  // Normalize OpenAI finish_reason to Anthropic stop_reason vocabulary so
+  // callers can branch on "tool_use" uniformly.
+  let stopReason = null;
+  if (finishReason === "tool_calls") stopReason = "tool_use";
+  else if (finishReason === "stop") stopReason = "end_turn";
+  else if (finishReason === "length") stopReason = "max_tokens";
+  else stopReason = finishReason;
+
+  return { stopReason, contentBlocks };
+}
+
+// --- provider dispatch ---
+
+function pickProvider(env, body) {
+  const requested =
+    typeof body?.provider === "string" ? body.provider.toLowerCase() : null;
+  const envDefault =
+    typeof env.LLM_PROVIDER === "string" ? env.LLM_PROVIDER.toLowerCase() : "";
+  const choice = requested || envDefault || "anthropic";
+  return choice === "virtuals" ? "virtuals" : "anthropic";
+}
+
+function providerConfigured(env, provider) {
+  if (provider === "virtuals") return !!env.VIRTUALS_API_KEY;
+  return !!env.ANTHROPIC_API_KEY;
+}
+
+async function callModel(env, system, messages, provider) {
+  if (provider === "virtuals") return callVirtuals(env, system, messages);
+  return callAnthropic(env, system, messages);
+}
+
+async function parseModelStream(response, onTextDelta, provider) {
+  if (provider === "virtuals") return parseVirtualsStream(response, onTextDelta);
+  return parseStream(response, onTextDelta);
+}
+
 async function handleExec(request, env) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS });
@@ -687,15 +882,20 @@ async function handleExec(request, env) {
   if (request.method !== "POST") {
     return json({ error: "method_not_allowed" }, { status: 405 });
   }
-  if (!env.ANTHROPIC_API_KEY) {
-    return json({ error: "not_configured" }, { status: 503 });
-  }
 
   let body;
   try {
     body = await request.json();
   } catch {
     return json({ error: "bad_json" }, { status: 400 });
+  }
+
+  const provider = pickProvider(env, body);
+  if (!providerConfigured(env, provider)) {
+    return json(
+      { error: "not_configured", provider },
+      { status: 503 },
+    );
   }
 
   const mode = body.mode === "run" ? "run" : "ask";
@@ -887,7 +1087,7 @@ async function handleExec(request, env) {
     let completed = false;
     try {
       for (let iter = 0; iter < MAX_ITERS; iter++) {
-        const upstream = await callAnthropic(env, system, messages);
+        const upstream = await callModel(env, system, messages, provider);
         if (!upstream.ok || !upstream.body) {
           const errText = await upstream.text().catch(() => "");
           await sendEvent({
@@ -897,7 +1097,11 @@ async function handleExec(request, env) {
           return;
         }
 
-        const { stopReason, contentBlocks } = await parseStream(upstream, sendText);
+        const { stopReason, contentBlocks } = await parseModelStream(
+          upstream,
+          sendText,
+          provider,
+        );
 
         // Accumulate plain text from this assistant turn (last turn wins for
         // memory purposes; intermediate tool-use turns also carry text deltas).
@@ -2897,8 +3101,9 @@ async function handleSchedules(request, env) {
 // Run a single skill non-streaming. Used by scheduled() — same path that
 // handleExec uses, minus the SSE wire. Returns { ok, text, error }.
 async function runSkillBatch(env, { user, skill, prompt, customSkill }) {
-  if (!env.ANTHROPIC_API_KEY) {
-    return { ok: false, error: "anthropic_not_configured" };
+  const provider = pickProvider(env, null);
+  if (!providerConfigured(env, provider)) {
+    return { ok: false, error: `${provider}_not_configured` };
   }
   const mode = "run";
   const effectiveSkillKey = customSkill ? `u:${customSkill.id}` : skill;
@@ -2914,7 +3119,7 @@ async function runSkillBatch(env, { user, skill, prompt, customSkill }) {
   let stopReason = null;
   try {
     for (let iter = 0; iter < MAX_ITERS; iter++) {
-      const upstream = await callAnthropic(env, system, messages);
+      const upstream = await callModel(env, system, messages, provider);
       if (!upstream.ok || !upstream.body) {
         const errText = await upstream.text().catch(() => "");
         return {
@@ -2922,9 +3127,10 @@ async function runSkillBatch(env, { user, skill, prompt, customSkill }) {
           error: `upstream_${upstream.status}: ${errText.slice(0, 120)}`,
         };
       }
-      const { stopReason: sr, contentBlocks } = await parseStream(
+      const { stopReason: sr, contentBlocks } = await parseModelStream(
         upstream,
         () => {},
+        provider,
       );
       stopReason = sr;
       for (const block of contentBlocks) {
