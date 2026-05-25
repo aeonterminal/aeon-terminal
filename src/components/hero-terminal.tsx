@@ -34,7 +34,7 @@ const DEMOS: Demo[] = [
         tone: "info",
       },
       {
-        text: "Sign in, run one of 13 live skills, or just ask anything",
+        text: "Sign in, run one of 19 live skills, or just ask anything",
       },
       {
         text: "with Claude + live web tools. Memory persists across",
@@ -132,13 +132,14 @@ export function HeroTerminal() {
 
   useEffect(() => {
     if (reducedMotion) return;
-    // Reset state so a reduced-motion → animated toggle doesn't append
-    // onto a stale transcript from the previous run.
-    setLines([]);
-    setActiveText("");
     let cancelled = false;
 
     async function run() {
+      // Reset state inside the async run() (not directly in the effect body)
+      // so a reduced-motion → animated toggle doesn't append onto a stale
+      // transcript from the previous run.
+      setLines([]);
+      setActiveText("");
       // Outer loop: never stops, lands the page in a permanent demo state.
       while (!cancelled) {
         for (let demoIdx = 0; demoIdx < DEMOS.length; demoIdx++) {

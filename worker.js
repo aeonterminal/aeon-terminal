@@ -118,10 +118,9 @@ const SKILL_REGISTRY = {
   },
   "on-chain-monitor": {
     name: "on-chain-monitor",
-    summary: "Watches wallets, contracts, and flows for material moves.",
-    comingSoon: true,
-    requires:
-      "Etherscan / Alchemy API key + wallet watchlist — not yet wired.",
+    summary: "Watches wallets, contracts, and flows for material moves on Base.",
+    persona:
+      "Expect an Ethereum/Base wallet address (0x followed by 40 hex chars) in the prompt. If absent or malformed, reply in one line asking for an address. Steps: 1) fetch_url https://base.blockscout.com/api/v2/addresses/<addr> to get balance + tx_count + last activity. 2) fetch_url https://base.blockscout.com/api/v2/addresses/<addr>/transactions?filter=to%20%7C%20from to get recent transactions. Output header 'on-chain-monitor · <addr first 6>…<addr last 4> · base'. Then a line 'balance · <coin_balance / 1e18 to 4 decimals> ETH · <transactions_count> total tx · first seen <block_number_of_first_transaction or first tx timestamp YYYY-MM-DD>'. Then 'recent (up to 5):' followed by up to 5 lines '<HH:MM dd Mon> · <method or \"transfer\"> · <value / 1e18 ETH or \"—\"> · → <to address short>'. End with one one-line activity read: 'activity · high' (tx in last 24h), 'activity · medium' (last 7d), 'activity · low' (last 30d), 'activity · dormant' (>30d). If the address returns 404 or empty, say 'no activity on Base' honestly in one line.",
   },
   "defi-monitor": {
     name: "defi-monitor",
@@ -155,8 +154,8 @@ const SKILL_REGISTRY = {
   "thread-formatter": {
     name: "thread-formatter",
     summary: "Turn long-form notes into a readable thread.",
-    comingSoon: true,
-    requires: "Style profile + draft store — not yet wired.",
+    persona:
+      "Expect a long-form note, essay, or draft in the prompt. Restructure it as a Twitter/X thread. No tool calls needed — this is pure rewriting. Output header 'thread · <n> tweets'. Then numbered tweets one per line, format '<i>/<n>  <tweet body>'. Each tweet under 270 chars (leave a few chars of headroom for thread numbering). First tweet is the hook (the most surprising or sharpest claim). Last tweet ends with a callback or call-to-action. Strip filler, hedging, and academic phrasing — keep claims sharp. Aim for 4-7 tweets; if the draft is too short for a thread, say so in one line and stop. If no text provided in the prompt, ask for a draft in a single short line.",
   },
   "reply-maker": {
     name: "reply-maker",
@@ -185,15 +184,15 @@ const SKILL_REGISTRY = {
     name: "daily-routine",
     summary:
       "Reminds you of your routine without being annoying about it.",
-    comingSoon: true,
-    requires: "User routine schema + push channel — not yet wired.",
+    persona:
+      "Expect a free-form routine description in the prompt (e.g. 'I want to write 1 hour, gym at 5pm, dinner with family'). No tool calls needed — pure planning. Output header 'routine · today'. Then 3-6 nudge lines in chronological order, format '<HH:MM> · <one-word verb> · <one-line note (under 70 chars)>'. Times in 24-hour format. Anchor to specific times the user mentions; for unanchored items pick reasonable defaults (writing 07:00-08:00, deep work mid-morning, gym 17:00, dinner 19:00). End with one 'energy:' line: a brief read on whether the day is loaded (suggest rest) or light (suggest stretch ambition). If no routine described, ask in one line for a sample day.",
   },
   "evening-recap": {
     name: "evening-recap",
-    summary: "What happened today, what shipped, what you owe people.",
-    comingSoon: true,
-    requires:
-      "Activity ingestion (calendar, git, inbox) — not yet wired.",
+    summary:
+      "What you shipped today on GitHub — commits, PRs, issues. One quick read before logging off.",
+    persona:
+      "Expect a GitHub username in the prompt (formats: 'username', '@username', or full https://github.com/username URL). If absent, reply in one line asking for one. Step 1: fetch_url https://api.github.com/users/<username>/events/public to get the user's public activity feed (returns up to 30 recent events). Step 2: filter to events with created_at within the last 24 hours. Output header 'evening-recap · @<username> · <today YYYY-MM-DD>'. Then up to 6 activity lines in chronological order (oldest first), format '<HH:MM> · <event short label> · <repo> · <detail>'. Event handling: PushEvent → '<N> commits', show first commit message; PullRequestEvent → '<action> #<num> <title trimmed>'; IssuesEvent → '<action> issue #<num>'; ReleaseEvent → 'released <tag_name>'; CreateEvent → 'created <ref_type> <ref>'; WatchEvent → 'starred'. End with summary line '<n> events · <unique repos> repos · <total commits> commits today'. If no events in the last 24h, say 'no public activity in the last 24h' in one line and stop. If the GitHub API returns 404, say '@<username> not found on GitHub' honestly.",
   },
   "goal-tracker": {
     name: "goal-tracker",
@@ -203,10 +202,10 @@ const SKILL_REGISTRY = {
   },
   "weekly-review": {
     name: "weekly-review",
-    summary: "Sunday review of the week: shipped, learned, dropped.",
-    comingSoon: true,
-    requires:
-      "Activity ingestion (calendar, git, inbox) — not yet wired.",
+    summary:
+      "7-day review of your GitHub: shipped, learned, dropped. Pulls from public events.",
+    persona:
+      "Expect a GitHub username in the prompt (same formats as evening-recap). If absent, ask in one line. Step 1: fetch_url https://api.github.com/users/<username>/events/public for the public activity feed. Step 2: filter to events with created_at within the last 7 days. Output header 'weekly-review · @<username> · week ending <today YYYY-MM-DD>'. Three sections:\n'shipped:' — up to 4 lines listing merged PRs, releases, or repos with >5 commits. Format '<repo> · <one-line outcome>'.\n'learned:' — 2 inferred lines about patterns: which repos got attention, what kind of work (frontend/infra/research/etc.), any new repo created.\n'dropped:' — note up to 2 repos that had activity before this 7-day window but none inside it (compare to event types; if you can't tell, omit this section and say so honestly).\nEnd with totals line '<prs> PRs · <commits> commits · <unique repos> repos · <events>'. If feed empty in last 7 days, say 'no public activity in the last 7 days' and stop. If API returns 404, say '@<username> not found on GitHub'.",
   },
   "idea-capture": {
     name: "idea-capture",
@@ -220,9 +219,9 @@ const SKILL_REGISTRY = {
   heartbeat: {
     name: "heartbeat",
     summary:
-      "A signal-of-life ping so you know agents are alive and the wiring works.",
-    comingSoon: true,
-    requires: "Agent fleet metrics pipeline — not yet wired.",
+      "A signal-of-life ping so you know agents are alive and the wiring works. Snapshot of /api/status.",
+    persona:
+      "Call fetch_url on https://aeonterminal.org/api/status to get the live infra + usage snapshot (JSON with `infra` object, `usage` object, and `skills` array). Output header 'heartbeat · <generated_at from response, sliced to HH:MM UTC>'. Then two sections:\n'infra:' — one line per probe in the infra object, format '<name> · <ok|down> · <latency_ms>ms'. Names typically include d1, base_rpc, dexscreener, github.\n'usage:' — one line: '<asks_today> asks · <runs_today> runs · <users_total> users · <wallets_linked> wallets · <skill_runs_today> skill runs · <schedules_active> schedules'.\nEnd with one one-line read counting infra failures: 'pulse · all systems ok' if zero down, else 'pulse · <n> probe(s) degraded'. If the api call itself fails or returns non-200, say so honestly in one line and stop.",
   },
   "skill-repair": {
     name: "skill-repair",
