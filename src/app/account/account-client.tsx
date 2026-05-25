@@ -236,8 +236,12 @@ export function AccountClient() {
   }, []);
 
   const createSchedule = useCallback(
-    async (input: { skill: string; cron: string; prompt: string }) => {
-      if (scheduleBusy) return;
+    async (input: {
+      skill: string;
+      cron: string;
+      prompt: string;
+    }): Promise<boolean> => {
+      if (scheduleBusy) return false;
       setScheduleBusy("create");
       setFlash(null);
       try {
@@ -256,11 +260,13 @@ export function AccountClient() {
         }
         setFlash({ kind: "ok", message: "schedule saved." });
         await refreshSchedules();
+        return true;
       } catch (err) {
         setFlash({
           kind: "err",
           message: err instanceof Error ? err.message : String(err),
         });
+        return false;
       } finally {
         setScheduleBusy(null);
       }
@@ -1022,7 +1028,14 @@ type SchedulesSectionProps = {
   data: SchedulesData | null;
   tier: TierInfo;
   scheduleBusy: string | null;
-  onCreate: (input: { skill: string; cron: string; prompt: string }) => void;
+  // Returns true on success so the form can clear the prompt only when the
+  // create actually went through (network failures / quota errors keep the
+  // user's typed prompt so they don't have to re-enter it).
+  onCreate: (input: {
+    skill: string;
+    cron: string;
+    prompt: string;
+  }) => Promise<boolean>;
   onToggle: (id: string, enabled: boolean) => void;
   onDelete: (id: string) => void;
 };
@@ -1046,18 +1059,28 @@ function SchedulesSection({
   const paid = tier.tier === "paid";
   const limit = data?.limit ?? 0;
   const schedules = data?.schedules ?? [];
-  const atLimit = paid && schedules.length >= limit;
+  // Wait for the /api/schedules response before deciding we're at the limit
+  // — otherwise the brief window between /api/me resolving (which flips the
+  // user to paid) and /api/schedules resolving renders "At the 0-schedule
+  // limit" instead of the create form.
+  const atLimit = data !== null && paid && schedules.length >= limit;
   const tick = data?.cron_tick_min ?? 15;
 
-  const submit = (e: React.FormEvent) => {
+  const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     let cron: string;
     if (formFreq === "hourly") cron = "hourly";
     else if (formFreq === "every6h") cron = "every6h";
     else if (formFreq === "daily") cron = `daily@${formHour}`;
     else cron = `weekly@${formDow}@${formHour}`;
-    onCreate({ skill: formSkill, cron, prompt: formPrompt.trim() });
-    setFormPrompt("");
+    // Only clear the prompt on success — keep the user's typed text on
+    // network errors / 4xx so they don't have to re-enter it.
+    const ok = await onCreate({
+      skill: formSkill,
+      cron,
+      prompt: formPrompt.trim(),
+    });
+    if (ok) setFormPrompt("");
   };
 
   return (
