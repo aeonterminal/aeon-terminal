@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <a href="https://orynth.dev/projects/aeon-terminal"><img src="https://orynth.dev/api/badge/aeon-terminal?theme=light&style=default" alt="Featured on Orynth" width="260" height="80"></a>
+</p>
+
+<p align="center">
   <a href="https://aeonterminal.org/"><img src="https://img.shields.io/badge/live-aeonterminal.org-FF6B1A?style=flat-square" alt="Live"></a>
   <a href="https://x.com/aeon_terminal"><img src="https://img.shields.io/badge/x-@aeon__terminal-43C165?style=flat-square&logo=x" alt="X"></a>
   <a href="https://nextjs.org"><img src="https://img.shields.io/badge/next.js-16-black?style=flat-square&logo=next.js" alt="Next.js 16"></a>

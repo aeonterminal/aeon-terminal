@@ -80,9 +80,25 @@ export function SiteFooter() {
             inspired by aeon ↗
           </a>
         </nav>
-        <p className="text-[10px] uppercase tracking-widest text-muted-2">
-          mit · v0.1.0
-        </p>
+        <div className="flex flex-col items-start gap-2 md:items-end">
+          <a
+            href="https://orynth.dev/projects/aeon-terminal"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="https://orynth.dev/api/badge/aeon-terminal?theme=light&style=default"
+              alt="Featured on Orynth"
+              width={130}
+              height={40}
+              className="opacity-70 transition-opacity hover:opacity-100"
+            />
+          </a>
+          <p className="text-[10px] uppercase tracking-widest text-muted-2">
+            mit · v0.1.0
+          </p>
+        </div>
       </div>
     </footer>
   );
