@@ -205,7 +205,7 @@ export const SKILLS: Skill[] = [
     slug: "on-chain-monitor",
     name: "on-chain-monitor",
     category: "crypto",
-    summary: "Watches a Base wallet: balance, tx count, recent activity, dormancy flag.",
+    summary: "Watches a Solana wallet: balance, tx count, recent activity, dormancy flag.",
     cron: "*/5 * * * *",
     inputs: ["wallet_address"],
     outputs: ["activity"],

@@ -38,7 +38,8 @@ export const ROADMAP: readonly RoadmapPhase[] = [
       },
       {
         label: "$aeonterminal token launch",
-        detail: "ca live on base via virtuals · banner + footer + /token page",
+        detail:
+          "launch coming soon · solana · ca + utility unlocks light up the moment it deploys",
       },
       {
         label: "custom skill creator",
@@ -48,12 +49,12 @@ export const ROADMAP: readonly RoadmapPhase[] = [
       {
         label: "hold to unlock paid quota",
         detail:
-          "wallet connect + on-chain balance check on base · holders skip the subscription · 200 asks + 50 runs/day",
+          "wallet connect + on-chain balance check on solana · holders skip the subscription · 200 asks + 50 runs/day",
       },
       {
         label: "live /status page",
         detail:
-          "real probes (worker · d1 · base rpc · dexscreener · github) + usage counters + per-skill activity · 30s poll",
+          "real probes (worker · d1 · solana rpc · dexscreener · github) + usage counters + per-skill activity · 30s poll",
       },
       {
         label: "holder-only skill gate",
@@ -132,7 +133,7 @@ export const ROADMAP: readonly RoadmapPhase[] = [
       },
       {
         label: "on-chain memory anchoring",
-        detail: "merkle-root run logs anchored to base · receipts portable",
+        detail: "merkle-root run logs anchored to solana · receipts portable",
       },
       {
         label: "skill marketplace",

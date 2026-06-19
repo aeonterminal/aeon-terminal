@@ -251,7 +251,7 @@ export function UserBadge() {
                 <>
                   unlocked by holding{" "}
                   <span className="text-foreground">100k ${TOKEN.symbol}</span>{" "}
-                  on Base.
+                  on Solana.
                 </>
               ) : isPaid ? (
                 <>active paid plan.</>
@@ -259,7 +259,7 @@ export function UserBadge() {
                 <>
                   hold{" "}
                   <span className="text-foreground">100k ${TOKEN.symbol}</span>{" "}
-                  on Base to unlock <span className="text-accent">paid</span>{" "}
+                  on Solana to unlock <span className="text-accent">paid</span>{" "}
                   quota.
                 </>
               )}

@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 
-import { CopyAddressButton } from "@/components/copy-address-button";
 import { TerminalWindow } from "@/components/terminal-window";
 import { TokenPriceCard } from "@/components/token-price-card";
 import { ROADMAP, statusLabel, type MilestoneStatus } from "@/lib/roadmap";
@@ -10,7 +9,7 @@ import { TOKEN, UTILITIES, type UtilityStatus } from "@/lib/token";
 export const metadata: Metadata = {
   title: "Token & Roadmap",
   description:
-    "$aeonterminal contract address, token utility, and the public roadmap for the agent terminal.",
+    "$aeonterminal launch coming soon. Token utility and the public roadmap for the agent terminal.",
 };
 
 const STATUS_DOT: Record<MilestoneStatus, string> = {
@@ -63,11 +62,13 @@ export default function TokenPage() {
             <span className="text-accent-2 glow-accent-2">one terminal.</span>
           </h1>
           <p className="mt-4 max-w-2xl text-balance text-sm leading-relaxed text-muted sm:text-base">
-            {TICKER} is the access layer for Aeon Terminal. Holders skip the
-            paid subscription, get exclusive skills, and steer which scaffolded
-            skill ships next. Token launched on{" "}
+            {TICKER} will be the access layer for Aeon Terminal. Holders skip
+            the paid subscription, get exclusive skills, and steer which
+            scaffolded skill ships next. Token launch on{" "}
             <span className="text-foreground">{TOKEN.chain}</span> via{" "}
-            <span className="text-foreground">{TOKEN.launchpad}</span>.
+            <span className="text-foreground">{TOKEN.launchpad}</span> is
+            coming soon — the contract address goes live here the moment it
+            deploys.
           </p>
 
           <TerminalWindow
@@ -85,10 +86,18 @@ export default function TokenPage() {
                 <span className="text-foreground">{TOKEN.launchpad}</span>
                 <span className="text-muted-2">[contract]</span>
                 <span className="flex min-w-0 flex-wrap items-center gap-2">
-                  <code className="break-all text-accent">
-                    {TOKEN.address}
-                  </code>
-                  <CopyAddressButton className="text-muted-2 hover:text-foreground" />
+                  <span className="inline-flex items-center gap-1.5 rounded border border-accent/40 bg-accent/10 px-2 py-0.5 text-accent">
+                    <span
+                      aria-hidden
+                      className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent shadow-[0_0_8px_var(--accent)]"
+                    />
+                    launch coming soon
+                  </span>
+                </span>
+                <span className="text-muted-2">[status]</span>
+                <span className="text-muted">
+                  pre-launch · holder utilities scaffolded, waiting for the
+                  contract
                 </span>
               </div>
             </div>
@@ -99,30 +108,15 @@ export default function TokenPage() {
           </div>
 
           <div className="mt-6 flex flex-wrap gap-3">
-            <a
-              href={TOKEN.buyUrl}
-              target="_blank"
-              rel="noopener noreferrer"
+            <Link
+              href="/terminal"
               className="inline-flex items-center gap-2 rounded border border-accent bg-accent/10 px-4 py-2 text-sm text-accent transition-colors hover:bg-accent/20"
             >
-              <span aria-hidden>{">"}</span> buy on virtuals ↗
-            </a>
-            <a
-              href={TOKEN.dexscreenerUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 rounded border border-border bg-surface px-4 py-2 text-sm text-foreground transition-colors hover:border-border-strong"
-            >
-              dexscreener ↗
-            </a>
-            <a
-              href={TOKEN.scanUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 rounded border border-border bg-surface px-4 py-2 text-sm text-muted transition-colors hover:border-border-strong hover:text-foreground"
-            >
-              basescan ↗
-            </a>
+              <span aria-hidden>{">"}</span> try the terminal
+            </Link>
+            <span className="inline-flex items-center gap-2 rounded border border-border bg-surface px-4 py-2 text-sm text-muted">
+              buy · launch coming soon
+            </span>
           </div>
         </div>
       </section>
@@ -299,9 +293,9 @@ export default function TokenPage() {
                 that we ship in public and update this page as we go.
               </li>
               <li>
-                · Don&apos;t buy more than you can lose. Confirm the contract
-                address from this page before buying — phishing tokens
-                impersonating us will appear.
+                · Token launch is coming soon. The official contract address
+                will appear here the moment it deploys — ignore any
+                “{TICKER}” address circulating before then, it is not us.
               </li>
             </ul>
           </div>
@@ -324,14 +318,9 @@ export default function TokenPage() {
               >
                 <span aria-hidden>{">"}</span> launch terminal
               </Link>
-              <a
-                href={TOKEN.buyUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 rounded border border-border bg-surface px-5 py-2.5 text-sm text-foreground transition-colors hover:border-border-strong"
-              >
-                buy on virtuals ↗
-              </a>
+              <span className="inline-flex items-center gap-2 rounded border border-border bg-surface px-5 py-2.5 text-sm text-muted">
+                buy · launch coming soon
+              </span>
             </div>
           </div>
         </div>

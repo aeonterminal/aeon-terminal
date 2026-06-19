@@ -1,18 +1,16 @@
 export const TOKEN = {
   symbol: "aeonterminal",
-  address: "0xda3ffca86273037CdDCf71AAE2cDEa6aef313285",
-  chain: "Base",
-  launchpad: "Virtuals Protocol",
-  buyUrl: "https://app.virtuals.io/virtuals/78419",
-  scanUrl:
-    "https://basescan.org/token/0xda3ffca86273037CdDCf71AAE2cDEa6aef313285",
-  dexscreenerUrl:
-    "https://dexscreener.com/base/0xda3ffca86273037CdDCf71AAE2cDEa6aef313285",
+  address: "", // SPL mint address — set once deployed on Solana
+  chain: "Solana",
+  launchpad: "Pump.fun",
+  buyUrl: "https://pump.fun",
+  scanUrl: "", // solscan URL — set once mint is live
+  dexscreenerUrl: "", // dexscreener URL — set once mint is live
 } as const;
 
-export function shortAddress(addr: string, n = 6): string {
-  if (addr.length <= 2 + n * 2) return addr;
-  return `${addr.slice(0, 2 + n)}…${addr.slice(-n)}`;
+export function shortAddress(addr: string, n = 4): string {
+  if (addr.length <= n * 2 + 2) return addr;
+  return `${addr.slice(0, n)}…${addr.slice(-n)}`;
 }
 
 export type UtilityStatus = "live" | "next" | "planned";
@@ -33,7 +31,7 @@ export const UTILITIES: readonly TokenUtility[] = [
     summary:
       "200 asks + 50 skill runs / day · 25 custom skills · free for $aeonterminal holders.",
     detail:
-      "Link any EVM wallet on /account. We read your $aeonterminal balance on Base via a public RPC. Hold ≥ 100,000 tokens and the paid quota turns on instantly — no Stripe, no card, no waitlist. Sell, and on the next refresh (≤ 1h) the account rolls back to free.",
+      "Link any Solana wallet on /account. We read your $aeonterminal SPL token balance via a public RPC. Hold ≥ 100,000 tokens and the paid quota turns on instantly — no Stripe, no card, no waitlist. Sell, and on the next refresh (≤ 1h) the account rolls back to free.",
     status: "live",
   },
   {
@@ -51,7 +49,7 @@ export const UTILITIES: readonly TokenUtility[] = [
     summary:
       "Public health probes, today's asks/runs counters, per-skill activity — refreshed every 30s.",
     detail:
-      "/status hits the worker, D1, Base RPC, Dexscreener, and GitHub on every load and reports real latency + error states. Counters and skill activity come from the same tables the rest of the app writes to. No fudged numbers, no demo mode.",
+      "/status hits the worker, D1, Solana RPC, Dexscreener, and GitHub on every load and reports real latency + error states. Counters and skill activity come from the same tables the rest of the app writes to. No fudged numbers, no demo mode.",
     status: "live",
   },
   {

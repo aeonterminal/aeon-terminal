@@ -1,8 +1,5 @@
 import Link from "next/link";
 
-import { CopyAddressButton } from "./copy-address-button";
-import { TOKEN } from "@/lib/token";
-
 export function SiteFooter() {
   return (
     <footer className="relative z-10 border-t border-border bg-background/80">
@@ -15,40 +12,18 @@ export function SiteFooter() {
           <span className="text-muted-2" aria-hidden>
             ·
           </span>
-          <span className="text-muted">{TOKEN.chain}</span>
-          <span className="text-muted-2" aria-hidden>
-            ·
+          <span className="inline-flex items-center gap-1.5 rounded border border-accent/40 bg-accent/10 px-2 py-0.5 text-accent">
+            <span
+              aria-hidden
+              className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent shadow-[0_0_8px_var(--accent)]"
+            />
+            launch coming soon
           </span>
-          <code className="min-w-0 break-all font-medium text-accent">
-            {TOKEN.address}
-          </code>
-          <CopyAddressButton className="text-muted-2" />
         </div>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-          <a
-            href={TOKEN.buyUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-accent-2 hover:text-foreground"
-          >
-            buy on virtuals ↗
-          </a>
-          <a
-            href={TOKEN.dexscreenerUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-muted hover:text-foreground"
-          >
-            dexscreener ↗
-          </a>
-          <a
-            href={TOKEN.scanUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-muted hover:text-foreground"
-          >
-            basescan ↗
-          </a>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-2">
+          <Link href="/token" className="hover:text-foreground">
+            roadmap →
+          </Link>
         </div>
       </div>
       <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-10 sm:px-6 md:flex-row md:items-center md:justify-between">

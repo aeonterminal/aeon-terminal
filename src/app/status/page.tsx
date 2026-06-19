@@ -5,7 +5,7 @@ import { StatusDashboard } from "./status-dashboard";
 export const metadata: Metadata = {
   title: "Status · live infrastructure & usage",
   description:
-    "Public health & usage signals for Aeon Terminal. Worker, D1, Base RPC, Dexscreener, GitHub probes plus today's asks/runs and per-skill activity, refreshed every 30s.",
+    "Public health & usage signals for Aeon Terminal. Worker, D1, Solana RPC, Dexscreener, GitHub probes plus today's asks/runs and per-skill activity, refreshed every 30s.",
 };
 
 export default function StatusPage() {
@@ -20,7 +20,7 @@ export default function StatusPage() {
           <span className="text-accent glow-accent">no fake dashboards.</span>
         </h1>
         <p className="max-w-2xl text-sm leading-relaxed text-muted">
-          What you see here is what the worker sees: real probes to D1, Base
+          What you see here is what the worker sees: real probes to D1, Solana
           RPC, Dexscreener, GitHub, plus today&apos;s usage counters from the
           same tables the rest of the app writes to. Polls every 30s. No
           history yet — this page is a trust signal, not a monitoring tool.

@@ -70,22 +70,38 @@ type LoadState =
   | { kind: "ok"; tier: TierInfo }
   | { kind: "err"; message: string };
 
-// Browser-injected EIP-1193 provider. Each wallet (MetaMask, Rabby, Coinbase
-// Wallet, etc.) attaches `window.ethereum`. We avoid any wallet SDK so the
-// dependency footprint stays at zero.
-type Eip1193Provider = {
-  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+// Browser-injected Solana wallet provider. Phantom, Solflare, Backpack, etc.
+// attach `window.solana` (or `window.phantom?.solana`). We avoid any wallet SDK
+// so the dependency footprint stays at zero.
+type SolanaProvider = {
+  isPhantom?: boolean;
+  connect(): Promise<{ publicKey: { toBytes(): Uint8Array; toString(): string } }>;
+  signMessage(message: Uint8Array, encoding: string): Promise<{ signature: Uint8Array }>;
+  disconnect(): Promise<void>;
+  publicKey: { toBytes(): Uint8Array; toString(): string } | null;
 };
 
-function getEthereum(): Eip1193Provider | null {
+function getSolana(): SolanaProvider | null {
   if (typeof window === "undefined") return null;
-  const w = window as unknown as { ethereum?: Eip1193Provider };
-  return w.ethereum ?? null;
+  const w = window as unknown as {
+    solana?: SolanaProvider;
+    phantom?: { solana?: SolanaProvider };
+  };
+  return w.phantom?.solana ?? w.solana ?? null;
 }
 
-// 18 decimals; just trim and floor for the display strip. We don't need
-// formatting fidelity beyond "this is roughly how many tokens you hold".
-function formatTokenAmount(wei: string, decimals = 18): string {
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+// SPL tokens typically use 9 decimals. Just trim and floor for the display
+// strip. We don't need formatting fidelity beyond "this is roughly how many
+// tokens you hold".
+function formatTokenAmount(wei: string, decimals = 9): string {
   let s = wei;
   if (!/^-?\d+$/.test(s)) return "0";
   const negative = s.startsWith("-");
@@ -362,12 +378,12 @@ export function AccountClient() {
   }, [busy]);
 
   const connect = useCallback(async () => {
-    const ethereum = getEthereum();
-    if (!ethereum) {
+    const solana = getSolana();
+    if (!solana) {
       setFlash({
         kind: "err",
         message:
-          "no wallet detected — install MetaMask, Rabby, or Coinbase Wallet and refresh.",
+          "no Solana wallet detected — install Phantom, Solflare, or Backpack and refresh.",
       });
       return;
     }
@@ -375,10 +391,8 @@ export function AccountClient() {
     setBusy("connect");
     setFlash(null);
     try {
-      const accounts = (await ethereum.request({
-        method: "eth_requestAccounts",
-      })) as string[];
-      const address = accounts && accounts[0];
+      const resp = await solana.connect();
+      const address = resp.publicKey.toString();
       if (!address) throw new Error("no account selected in your wallet");
 
       const nonceRes = await fetch("/api/wallet/nonce", {
@@ -398,10 +412,12 @@ export function AccountClient() {
       };
       if (!message) throw new Error("missing message");
 
-      const signature = (await ethereum.request({
-        method: "personal_sign",
-        params: [message, address],
-      })) as string;
+      const encodedMessage = new TextEncoder().encode(message);
+      const { signature: sigBytes } = await solana.signMessage(
+        encodedMessage,
+        "utf8",
+      );
+      const signature = bytesToBase64(sigBytes);
 
       const verifyRes = await fetch("/api/wallet/verify", {
         method: "POST",
@@ -429,7 +445,6 @@ export function AccountClient() {
       setState({ kind: "ok", tier: verifyJson.tier });
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
-      // user-cancellation surfaces as a noisy provider error; soften it
       const msg = /reject|denied|cancel|user/i.test(raw)
         ? "sign-in cancelled in your wallet."
         : raw;
@@ -623,7 +638,7 @@ export function AccountClient() {
           </p>
           <p className="text-[11px] text-muted-2">
             chain:{" "}
-            <span className="text-foreground">{TOKEN.chain} · 8453</span>
+            <span className="text-foreground">{TOKEN.chain} · mainnet-beta</span>
           </p>
         </div>
 
@@ -643,12 +658,12 @@ export function AccountClient() {
                 </p>
               </div>
               <a
-                href={`https://basescan.org/address/${wallet.address}`}
+                href={`https://solscan.io/account/${wallet.address}`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="self-start rounded border border-border px-2.5 py-1 text-[11px] text-muted hover:border-accent hover:text-accent"
               >
-                basescan ↗
+                solscan ↗
               </a>
             </div>
 
@@ -714,22 +729,19 @@ export function AccountClient() {
               >
                 {busy === "disconnect" ? "unlinking…" : "unlink"}
               </button>
-              <a
-                href={TOKEN.buyUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="ml-auto rounded border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs text-accent hover:bg-accent/20"
+              <span
+                className="ml-auto rounded border border-border bg-surface px-3 py-1.5 text-xs text-muted"
+                title="$aeonterminal launch coming soon"
               >
-                buy ${TOKEN.symbol} ↗
-              </a>
+                buy · launch coming soon
+              </span>
             </div>
           </div>
         ) : (
           <div className="mt-4 space-y-4">
             <p className="text-sm text-foreground">
-              No wallet linked yet. Connect an EVM wallet on{" "}
-              <span className="text-foreground">Base</span> and we&apos;ll
-              check your{" "}
+              No wallet linked yet. Connect a Solana wallet and
+              we&apos;ll check your{" "}
               <span className="text-foreground">${TOKEN.symbol}</span>{" "}
               balance.
             </p>
@@ -740,7 +752,7 @@ export function AccountClient() {
               </li>
               <li>
                 <span className="text-muted-2">2.</span> Approve the connection
-                in your wallet (MetaMask / Rabby / Coinbase / etc.).
+                in your wallet (Phantom / Solflare / Backpack / etc.).
               </li>
               <li>
                 <span className="text-muted-2">3.</span> Sign a one-time
@@ -763,14 +775,12 @@ export function AccountClient() {
               >
                 {busy === "connect" ? "signing…" : "→ connect wallet"}
               </button>
-              <a
-                href={TOKEN.buyUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="rounded border border-border px-3 py-2 text-xs text-muted hover:border-border-strong hover:text-foreground"
+              <span
+                className="rounded border border-border px-3 py-2 text-xs text-muted"
+                title="$aeonterminal launch coming soon"
               >
-                buy ${TOKEN.symbol} ↗
-              </a>
+                buy · launch coming soon
+              </span>
             </div>
           </div>
         )}
@@ -783,13 +793,13 @@ export function AccountClient() {
         <ul className="mt-3 space-y-2">
           <li>
             <span className="text-foreground">Read-only.</span> We only ever
-            call <code className="text-foreground">balanceOf(you)</code> on
-            Base. No transactions, no approvals, no token movements.
+            read your SPL token balance on Solana. No transactions, no
+            approvals, no token movements.
           </li>
           <li>
             <span className="text-foreground">Signature only.</span> Linking is
-            a single off-chain personal_sign — same flow MetaMask uses for
-            &ldquo;Sign in with Ethereum&rdquo;. Zero gas.
+            a single off-chain signMessage — same flow Phantom uses for
+            &ldquo;Sign In With Solana&rdquo;. Zero gas.
           </li>
           <li>
             <span className="text-foreground">Tier follows balance.</span>{" "}

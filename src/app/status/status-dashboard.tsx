@@ -19,7 +19,7 @@ type StatusPayload = {
   day: string;
   probes: {
     d1: Probe;
-    base_rpc: Probe;
+    solana_rpc: Probe;
     dexscreener: Probe;
     github: Probe;
   };
@@ -138,12 +138,12 @@ export function StatusDashboard() {
         detail: p.d1.ok ? `${p.d1.result ?? "pong"} · ${p.d1.latency_ms}ms` : p.d1.error ?? "down",
       },
       {
-        key: "base_rpc",
-        label: "base rpc",
-        probe: p.base_rpc,
-        detail: p.base_rpc.ok
-          ? `block ${formatNumber(p.base_rpc.block_number ?? 0)} · ${p.base_rpc.latency_ms}ms`
-          : p.base_rpc.error ?? "down",
+        key: "solana_rpc",
+        label: "solana rpc",
+        probe: p.solana_rpc,
+        detail: p.solana_rpc.ok
+          ? `slot ${formatNumber(p.solana_rpc.block_number ?? 0)} · ${p.solana_rpc.latency_ms}ms`
+          : p.solana_rpc.error ?? "down",
       },
       {
         key: "dexscreener",

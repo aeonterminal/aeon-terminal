@@ -9,8 +9,8 @@
 // Per-session memory uses the optional AEON_MEMORY KV binding. If the binding
 // is missing, the Worker degrades to stateless mode (each request fresh).
 
-import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { keccak_256 } from "@noble/hashes/sha3.js";
+// ed25519 signature verification uses the Web Crypto API (available in
+// Cloudflare Workers natively). No external imports needed for Solana.
 
 // Skill registry. Keys are the slugs the terminal sends in `skill` field.
 // Each entry has either a real `persona` (instructs Claude how to use the
@@ -118,9 +118,9 @@ const SKILL_REGISTRY = {
   },
   "on-chain-monitor": {
     name: "on-chain-monitor",
-    summary: "Watches wallets, contracts, and flows for material moves on Base.",
+    summary: "Watches wallets on Solana: SOL balance, recent transactions, activity level.",
     persona:
-      "Expect an Ethereum/Base wallet address (0x followed by 40 hex chars) in the prompt. If absent or malformed, reply in one line asking for an address. Steps: 1) fetch_url https://base.blockscout.com/api/v2/addresses/<addr> — JSON response has `coin_balance` (string, wei), `transactions_count` (number), and may have `creation_tx_hash`. 2) fetch_url https://base.blockscout.com/api/v2/addresses/<addr>/transactions (NO query params — the bare endpoint returns recent tx; the `filter` parameter often returns 422). JSON response has `items` (array, newest first). Each item has `timestamp` (ISO string), `method` (string or null), `value` (string, wei), `to` (object with `hash` field, may be null for contract creation), and `hash`. Output header 'on-chain-monitor · <addr first 6>…<addr last 4> · base'. Then a line 'balance · <coin_balance / 1e18 to 4 decimals> ETH · <transactions_count> total tx'. Then ALWAYS emit a 'recent (up to 5):' header — never skip this section. If items[] has entries, follow with up to 5 lines from items[0..4]: '<timestamp formatted HH:MM dd Mon> · <method or \"transfer\"> · <value / 1e18 ETH to 4 decimals, or \"—\" if value is \"0\"> · → <to.hash first 6>…<to.hash last 4, or \"contract\" if to is null>'. If the transactions endpoint returned non-200, no items, or parsing fails, emit exactly ONE line under the header: '— could not retrieve recent transactions'. End with one one-line activity read based on items[0].timestamp: 'activity · high' (last 24h), 'activity · medium' (last 7d), 'activity · low' (last 30d), 'activity · dormant' (>30d or no recent data). If the address endpoint itself returns 404 or empty, say 'no activity on Base' honestly in one line and stop.",
+      "Expect a Solana wallet address (base58, 32-44 chars) in the prompt. If absent or malformed, reply in one line asking for an address. Steps: 1) fetch_url https://api.mainnet-beta.solana.com with POST body {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"<addr>\"]} — response has result.value (lamports, divide by 1e9 for SOL). 2) fetch_url https://api.mainnet-beta.solana.com with POST body {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getSignaturesForAddress\",\"params\":[\"<addr>\",{\"limit\":5}]} — response has result[] array of recent signatures, each with `signature`, `blockTime` (unix timestamp), `err` (null if success), `memo` (string or null). Output header 'on-chain-monitor · <addr first 6>…<addr last 4> · solana'. Then a line 'balance · <value / 1e9 to 4 decimals> SOL'. Then ALWAYS emit a 'recent (up to 5):' header — never skip this section. If result[] has entries, follow with up to 5 lines: '<blockTime formatted HH:MM dd Mon> · <\"ok\" if err is null, else \"failed\"> · sig <signature first 8>…<signature last 4>'. If the signatures endpoint returned non-200 or parsing fails, emit exactly ONE line under the header: '— could not retrieve recent transactions'. End with one one-line activity read based on result[0].blockTime: 'activity · high' (last 24h), 'activity · medium' (last 7d), 'activity · low' (last 30d), 'activity · dormant' (>30d or no recent data). If the balance call fails or returns zero with no signatures, say 'no activity on Solana' honestly in one line and stop.",
   },
   "defi-monitor": {
     name: "defi-monitor",
@@ -221,7 +221,7 @@ const SKILL_REGISTRY = {
     summary:
       "A signal-of-life ping so you know agents are alive and the wiring works. Snapshot of /api/status.",
     persona:
-      "Call the aeon_status tool (no arguments) to get the live infra + usage snapshot. JSON response has `now_iso` (ISO timestamp), `probes` (object keyed by probe name d1, base_rpc, dexscreener, github — each entry has `ok: boolean` and `latency_ms: number`), `counters` (asks_today, runs_today, users_total, users_24h, wallets_linked, active_today), and `skills` (total, live, coming_soon). Output header 'heartbeat · <now_iso sliced to HH:MM UTC>'. Then two sections:\n'infra:' — one line per key in probes, format '<name> · <ok|down> · <latency_ms>ms'.\n'usage:' — one line: '<counters.asks_today> asks · <counters.runs_today> runs · <counters.users_total> users · <counters.wallets_linked> wallets · <counters.active_today> active today · <skills.live>/<skills.total> skills live'.\nEnd with one one-line read counting infra failures: 'pulse · all systems ok' if zero `ok:false` probes, else 'pulse · <n> probe(s) degraded'. If the tool call itself errors, say so honestly in one line and stop.",
+      "Call the aeon_status tool (no arguments) to get the live infra + usage snapshot. JSON response has `now_iso` (ISO timestamp), `probes` (object keyed by probe name d1, solana_rpc, dexscreener, github — each entry has `ok: boolean` and `latency_ms: number`), `counters` (asks_today, runs_today, users_total, users_24h, wallets_linked, active_today), and `skills` (total, live, coming_soon). Output header 'heartbeat · <now_iso sliced to HH:MM UTC>'. Then two sections:\n'infra:' — one line per key in probes, format '<name> · <ok|down> · <latency_ms>ms'.\n'usage:' — one line: '<counters.asks_today> asks · <counters.runs_today> runs · <counters.users_total> users · <counters.wallets_linked> wallets · <counters.active_today> active today · <skills.live>/<skills.total> skills live'.\nEnd with one one-line read counting infra failures: 'pulse · all systems ok' if zero `ok:false` probes, else 'pulse · <n> probe(s) degraded'. If the tool call itself errors, say so honestly in one line and stop.",
   },
   "skill-repair": {
     name: "skill-repair",
@@ -334,7 +334,7 @@ const TOOLS_SPEC = [
   {
     name: "aeon_status",
     description:
-      "Get the current Aeon Terminal infra + usage snapshot (D1 / Base RPC / Dexscreener / GitHub health probes, asks/runs/users/wallets counters, and live skill count). Returns the same JSON payload as the public /api/status endpoint but resolved in-worker so Cloudflare doesn't reject the self-hostname fetch. No parameters.",
+      "Get the current Aeon Terminal infra + usage snapshot (D1 / Solana RPC / Dexscreener / GitHub health probes, asks/runs/users/wallets counters, and live skill count). Returns the same JSON payload as the public /api/status endpoint but resolved in-worker so Cloudflare doesn't reject the self-hostname fetch. No parameters.",
     input_schema: {
       type: "object",
       properties: {},
@@ -1315,9 +1315,9 @@ async function ensureSchema(env) {
     )`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_user_skills_user_slug ON user_skills(user_id, slug)`,
     `CREATE INDEX IF NOT EXISTS idx_user_skills_visibility ON user_skills(visibility, created_at)`,
-    // One linked wallet per user. address is lowercase 0x-prefixed.
-    // balance_wei is a decimal string (uint256 can overflow Number); balance_at
-    // tracks the last on-chain refresh so we can cache.
+    // One linked wallet per user. address is a Solana base58 public key.
+    // balance_wei is a decimal string (lamport-scale); balance_at tracks
+    // the last on-chain refresh so we can cache.
     `CREATE TABLE IF NOT EXISTS user_wallets (
       user_id TEXT PRIMARY KEY,
       address TEXT NOT NULL,
@@ -1856,18 +1856,22 @@ async function dbGetUsage(env, userId, plan) {
 //
 // A signed-in user's effective tier is the max of their billing plan and any
 // linked wallet that holds ≥ TOKEN_HOLDER_THRESHOLD_WEI of $aeonterminal on
-// Base. Free + holder wallet → paid quotas. Stripe paid plan → paid quotas.
+// Solana. Free + holder wallet → paid quotas. Stripe paid plan → paid quotas.
 //
 // Tier resolution caches the on-chain balance in `user_wallets.balance_wei`
 // for TOKEN_BALANCE_TTL_SEC. Reads piggyback on `currentUser` callers so the
 // balance is refreshed lazily — no background polling required.
 
-const TOKEN_CONTRACT_ADDRESS = "0xda3ffca86273037cddcf71aae2cdea6aef313285";
-const TOKEN_CHAIN_ID = 8453;
-const TOKEN_RPC_URL_DEFAULT = "https://mainnet.base.org";
-// 100,000 $aeonterminal (18 decimals) ≈ 0.01% of the 1B supply. Override via
-// the TOKEN_HOLDER_THRESHOLD_WEI worker variable if the unlock bar moves.
-const TOKEN_HOLDER_THRESHOLD_WEI_DEFAULT = 100_000n * 10n ** 18n;
+// Solana SPL token mint address — set this once the token deploys.
+// Until then fetchOnChainBalance always returns 0 (no mint = no holders).
+const TOKEN_MINT_ADDRESS = "";
+const TOKEN_CHAIN_ID = 0; // Solana mainnet (no EVM chain id)
+const TOKEN_RPC_URL_DEFAULT = "https://api.mainnet-beta.solana.com";
+// 100,000 $aeonterminal (SPL tokens typically use 6-9 decimals; adjust
+// TOKEN_DECIMALS once the mint is known). Override via the
+// TOKEN_HOLDER_THRESHOLD_WEI worker variable if the unlock bar moves.
+const TOKEN_DECIMALS = 9;
+const TOKEN_HOLDER_THRESHOLD_WEI_DEFAULT = 100_000n * 10n ** BigInt(TOKEN_DECIMALS);
 const TOKEN_BALANCE_TTL_SEC = 60 * 60; // 1h
 const WALLET_NONCE_TTL_SEC = 5 * 60;
 
@@ -1885,74 +1889,70 @@ function tokenHolderThresholdWei(env) {
   }
 }
 
-function bytesToHex(b) {
-  return Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
-}
-
-function hexToBytes(hex) {
-  let h = hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
-  if (h.length % 2 !== 0) h = "0" + h;
-  const out = new Uint8Array(h.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = parseInt(h.substr(i * 2, 2), 16);
-  }
-  return out;
-}
-
-function isHexAddress(s) {
-  return typeof s === "string" && /^0x[0-9a-fA-F]{40}$/.test(s);
+// Solana addresses are base58-encoded 32-byte public keys (32-44 chars).
+function isSolanaAddress(s) {
+  return typeof s === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(s);
 }
 
 function normalizeAddress(s) {
-  return s.toLowerCase();
+  return s; // Solana addresses are case-sensitive base58
 }
 
-// EIP-191 personal_sign recovery. Returns lowercase 0x-prefixed address or
-// throws on malformed input. Verified with @noble/curves v2 (recovered format
-// puts the v byte first).
-function recoverPersonalSignAddress(message, signatureHex) {
-  const sig = hexToBytes(signatureHex);
-  if (sig.length !== 65) throw new Error("bad_sig_length");
-  let v = sig[64];
-  if (v >= 27) v -= 27;
-  if (v !== 0 && v !== 1) throw new Error("bad_recovery_byte");
-  const sigForNoble = new Uint8Array(65);
-  sigForNoble[0] = v;
-  sigForNoble.set(sig.slice(0, 64), 1);
-  const msgBytes = new TextEncoder().encode(message);
-  const prefix = new TextEncoder().encode(
-    "\x19Ethereum Signed Message:\n" + msgBytes.length,
+// Base58 decoder (Bitcoin/Solana alphabet). Needed to convert Solana
+// public-key strings into raw 32-byte keys for ed25519 verification.
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+function base58Decode(str) {
+  const bytes = [0];
+  for (let i = 0; i < str.length; i++) {
+    const c = BASE58_ALPHABET.indexOf(str[i]);
+    if (c < 0) throw new Error("bad_base58_char");
+    for (let j = 0; j < bytes.length; j++) bytes[j] *= 58;
+    bytes[0] += c;
+    let carry = 0;
+    for (let j = 0; j < bytes.length; j++) {
+      bytes[j] += carry;
+      carry = (bytes[j] >> 8) & 0xff;
+      bytes[j] &= 0xff;
+    }
+    while (carry) {
+      bytes.push(carry & 0xff);
+      carry >>= 8;
+    }
+  }
+  // leading zeros
+  for (let i = 0; i < str.length && str[i] === "1"; i++) bytes.push(0);
+  return new Uint8Array(bytes.reverse());
+}
+
+// Verify an ed25519 signature using the Web Crypto API. Returns true if
+// the signature is valid for the given message and public key.
+async function verifyEd25519Signature(publicKeyBase58, messageBytes, signatureBytes) {
+  const pubKeyBytes = base58Decode(publicKeyBase58);
+  if (pubKeyBytes.length !== 32) throw new Error("bad_pubkey_length");
+  const key = await crypto.subtle.importKey(
+    "raw",
+    pubKeyBytes,
+    { name: "Ed25519" },
+    false,
+    ["verify"],
   );
-  const full = new Uint8Array(prefix.length + msgBytes.length);
-  full.set(prefix, 0);
-  full.set(msgBytes, prefix.length);
-  const hash = keccak_256(full);
-  const compressed = secp256k1.recoverPublicKey(sigForNoble, hash, {
-    prehash: false,
-    format: "recovered",
-  });
-  const uncompressed = secp256k1.Point.fromBytes(compressed).toBytes(false);
-  // uncompressed = [0x04 | X(32) | Y(32)]; eth address = last 20 of keccak(X|Y)
-  const addrHash = keccak_256(uncompressed.slice(1));
-  return "0x" + bytesToHex(addrHash.slice(12));
+  return crypto.subtle.verify("Ed25519", key, signatureBytes, messageBytes);
 }
 
-function buildSiweMessage({ domain, address, nonce, issuedAt }) {
+function buildSignInMessage({ domain, address, nonce, issuedAt }) {
   return [
-    `${domain} wants you to sign in with your Ethereum account:`,
+    `${domain} wants you to sign in with your Solana account:`,
     address,
     "",
-    "Link this wallet to your aeon.terminal account. Holding the threshold balance of $aeonterminal unlocks holder-tier quota.",
+    "Link this Solana wallet to your aeon.terminal account. Holding the threshold balance of $aeonterminal unlocks holder-tier quota.",
     "",
     `URI: https://${domain}/account`,
-    `Version: 1`,
-    `Chain ID: ${TOKEN_CHAIN_ID}`,
     `Nonce: ${nonce}`,
     `Issued At: ${issuedAt}`,
   ].join("\n");
 }
 
-async function rpcCall(env, method, params) {
+async function solanaRpcCall(env, method, params) {
   const res = await fetch(tokenRpcUrl(env), {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1965,17 +1965,24 @@ async function rpcCall(env, method, params) {
   return body.result;
 }
 
-// ERC-20 balanceOf(address) selector = 0x70a08231
+// Fetch SPL token balance for a wallet on Solana.
+// Uses getTokenAccountsByOwner to find token accounts for the mint,
+// then sums the balances. Returns 0 if no mint is configured yet.
 async function fetchOnChainBalance(env, address) {
-  const addr = address.toLowerCase().replace(/^0x/, "").padStart(64, "0");
-  const data = "0x70a08231" + addr;
-  const result = await rpcCall(env, "eth_call", [
-    { to: TOKEN_CONTRACT_ADDRESS, data },
-    "latest",
-  ]);
-  if (!result || result === "0x") return 0n;
+  if (!TOKEN_MINT_ADDRESS) return 0n; // no mint deployed yet
   try {
-    return BigInt(result);
+    const result = await solanaRpcCall(env, "getTokenAccountsByOwner", [
+      address,
+      { mint: TOKEN_MINT_ADDRESS },
+      { encoding: "jsonParsed" },
+    ]);
+    if (!result || !result.value || !result.value.length) return 0n;
+    let total = 0n;
+    for (const acct of result.value) {
+      const amount = acct?.account?.data?.parsed?.info?.tokenAmount?.amount;
+      if (amount) total += BigInt(amount);
+    }
+    return total;
   } catch {
     return 0n;
   }
@@ -2020,7 +2027,7 @@ async function dbDeleteWallet(env, userId) {
 async function dbWalletOwnerForAddress(env, address) {
   const row = await env.DB
     .prepare(`SELECT user_id FROM user_wallets WHERE address = ? LIMIT 1`)
-    .bind(address.toLowerCase())
+    .bind(address)
     .first();
   return row ? row.user_id : null;
 }
@@ -2031,7 +2038,7 @@ async function dbWalletOwnerForAddress(env, address) {
 async function dbDeleteWalletByAddress(env, address) {
   await env.DB
     .prepare(`DELETE FROM user_wallets WHERE address = ?`)
-    .bind(address.toLowerCase())
+    .bind(address)
     .run();
 }
 
@@ -2234,7 +2241,7 @@ async function handleWallet(request, env) {
       body = {};
     }
     const rawAddress = body && body.address;
-    if (rawAddress != null && !isHexAddress(String(rawAddress))) {
+    if (rawAddress != null && !isSolanaAddress(String(rawAddress))) {
       return json({ error: "bad_address" }, { status: 400 });
     }
     const address = rawAddress ? normalizeAddress(String(rawAddress)) : null;
@@ -2242,7 +2249,7 @@ async function handleWallet(request, env) {
     await dbStoreWalletNonce(env, user.id, nonce);
     const issuedAt = new Date().toISOString();
     const message = address
-      ? buildSiweMessage({
+      ? buildSignInMessage({
           domain: CANONICAL_HOST,
           address,
           nonce,
@@ -2271,10 +2278,10 @@ async function handleWallet(request, env) {
     const signature = body && body.signature;
     const nonce = body && body.nonce;
     const issuedAt = body && body.issued_at;
-    if (!isHexAddress(String(address || ""))) {
+    if (!isSolanaAddress(String(address || ""))) {
       return json({ error: "bad_address" }, { status: 400 });
     }
-    if (typeof signature !== "string" || !signature.startsWith("0x")) {
+    if (typeof signature !== "string" || signature.length < 10) {
       return json({ error: "bad_signature" }, { status: 400 });
     }
     if (typeof nonce !== "string" || !/^[a-f0-9]{16,128}$/.test(nonce)) {
@@ -2286,19 +2293,31 @@ async function handleWallet(request, env) {
     const normAddr = normalizeAddress(String(address));
     const consumed = await dbConsumeWalletNonce(env, nonce, user.id);
     if (!consumed.ok) return json({ error: consumed.reason }, { status: 400 });
-    const message = buildSiweMessage({
+    const message = buildSignInMessage({
       domain: CANONICAL_HOST,
       address: normAddr,
       nonce,
       issuedAt,
     });
-    let recovered;
+    // Decode base64 signature and verify ed25519
+    let sigBytes;
     try {
-      recovered = recoverPersonalSignAddress(message, signature);
+      const binaryStr = atob(signature);
+      sigBytes = new Uint8Array(binaryStr.length);
+      for (let i = 0; i < binaryStr.length; i++) {
+        sigBytes[i] = binaryStr.charCodeAt(i);
+      }
     } catch {
       return json({ error: "bad_signature" }, { status: 400 });
     }
-    if (recovered.toLowerCase() !== normAddr) {
+    const msgBytes = new TextEncoder().encode(message);
+    let valid;
+    try {
+      valid = await verifyEd25519Signature(normAddr, msgBytes, sigBytes);
+    } catch {
+      return json({ error: "bad_signature" }, { status: 400 });
+    }
+    if (!valid) {
       return json({ error: "signature_mismatch" }, { status: 400 });
     }
     // Enforce 1-wallet-1-account: if this address is already linked to a
@@ -4071,7 +4090,7 @@ async function getStatusSnapshot(env) {
   // even started.
   const [
     d1Probe,
-    baseRpcProbe,
+    solanaRpcProbe,
     dexscreenerProbe,
     githubProbe,
     askRow,
@@ -4086,13 +4105,13 @@ async function getStatusSnapshot(env) {
       const row = await env.DB.prepare("SELECT 1 AS ok").first();
       return { result: row && row.ok === 1 ? "pong" : "unexpected" };
     }),
-    probeWithTimeout("base_rpc", async () => {
-      const blockHex = await rpcCall(env, "eth_blockNumber", []);
-      return { block_number: Number.parseInt(blockHex, 16) };
+    probeWithTimeout("solana_rpc", async () => {
+      const slot = await solanaRpcCall(env, "getSlot", []);
+      return { block_number: slot };
     }),
     probeWithTimeout("dexscreener", async () => {
       const res = await fetch(
-        `https://api.dexscreener.com/latest/dex/tokens/${TOKEN_CONTRACT_ADDRESS}`,
+        `https://api.dexscreener.com/latest/dex/tokens/${TOKEN_MINT_ADDRESS || "So11111111111111111111111111111111111111112"}`,
         { cf: { cacheTtl: 0 } },
       );
       if (!res.ok) throw new Error(`http_${res.status}`);
@@ -4146,7 +4165,7 @@ async function getStatusSnapshot(env) {
 
   const probes = {
     d1: d1Probe,
-    base_rpc: baseRpcProbe,
+    solana_rpc: solanaRpcProbe,
     dexscreener: dexscreenerProbe,
     github: githubProbe,
   };

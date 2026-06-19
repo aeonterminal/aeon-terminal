@@ -7,7 +7,7 @@ import { AccountClient } from "./account-client";
 export const metadata: Metadata = {
   title: "Account · wallet",
   description:
-    "Link your wallet to unlock holder-tier quota. Aeon Terminal checks your $aeonterminal balance on Base; hold the threshold and the paid quota turns on without a subscription.",
+    "Link your wallet to unlock holder-tier quota. Aeon Terminal checks your $aeonterminal SPL token balance on Solana; hold the threshold and the paid quota turns on without a subscription.",
 };
 
 export default function AccountPage() {
@@ -22,7 +22,7 @@ export default function AccountPage() {
           <span className="text-accent glow-accent">holder tier.</span>
         </h1>
         <p className="max-w-2xl text-sm leading-relaxed text-muted">
-          Connect any EVM wallet on Base. We&apos;ll check your{" "}
+          Connect any Solana wallet. We&apos;ll check your{" "}
           <span className="text-foreground">${TOKEN.symbol}</span> balance and,
           if you hold the threshold, raise your daily quota to the paid tier —
           no Stripe required. Sell the position and your account rolls back to

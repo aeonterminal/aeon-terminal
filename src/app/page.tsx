@@ -317,8 +317,8 @@ export default function HomePage() {
               </h2>
               <p className="mt-3 max-w-3xl text-sm leading-relaxed text-muted">
                 Hold $aeonterminal to unlock paid quota, holder-only skills,
-                and a vote on which scaffolded skill ships next. Token launched
-                on {TOKEN.chain} via {TOKEN.launchpad}.
+                and a vote on which scaffolded skill ships next. Token launch
+                on {TOKEN.chain} via {TOKEN.launchpad} is coming soon.
               </p>
             </div>
             <Link
