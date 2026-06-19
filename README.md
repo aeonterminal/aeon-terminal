@@ -152,13 +152,13 @@ The site is one Cloudflare Worker that serves both static assets and the `/api/e
    - Name: `ANTHROPIC_API_KEY`
    - Value: your Anthropic API key
 
-   Optional — use [Virtual Protocol compute](https://compute.virtuals.io/) as an
+   Optional — use [Orynth compute](https://compute.orynth.com/) as an
    alternative provider (OpenAI-compatible, supports models like Kimi K2):
-   - Add secret `VIRTUALS_API_KEY` with your Virtuals API key
-   - To make it the default, also add `LLM_PROVIDER=virtuals` (string var)
-   - Optionally override the model with `VIRTUALS_MODEL` (default
+   - Add secret `ORYNTH_API_KEY` with your Orynth API key
+   - To make it the default, also add `LLM_PROVIDER=orynth` (string var)
+   - Optionally override the model with `ORYNTH_MODEL` (default
      `moonshotai/kimi-k2-0905`)
-   - Clients can override per-request by sending `{"provider": "virtuals"}`
+   - Clients can override per-request by sending `{"provider": "orynth"}`
      (or `"anthropic"`) in the `/api/exec` JSON body.
 
 4. **Custom domain** (optional)

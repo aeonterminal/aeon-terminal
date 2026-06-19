@@ -2,8 +2,8 @@ export const TOKEN = {
   symbol: "aeonterminal",
   address: "", // SPL mint address — set once deployed on Solana
   chain: "Solana",
-  launchpad: "Pump.fun",
-  buyUrl: "https://pump.fun",
+  launchpad: "Orynth",
+  buyUrl: "https://orynth.com",
   scanUrl: "", // solscan URL — set once mint is live
   dexscreenerUrl: "", // dexscreener URL — set once mint is live
 } as const;

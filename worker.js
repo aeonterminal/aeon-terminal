@@ -717,16 +717,16 @@ async function parseStream(response, onTextDelta) {
   return { stopReason, contentBlocks: blocks.filter(Boolean) };
 }
 
-// --- Virtuals (OpenAI-compatible) provider ---
+// --- Orynth (OpenAI-compatible) provider ---
 //
-// compute.virtuals.io exposes an OpenAI-compatible /v1/chat/completions
+// compute.orynth.com exposes an OpenAI-compatible /v1/chat/completions
 // endpoint. Internal message + tool format stays Anthropic-shaped (so the
 // tool-use loop in handleExec / runSkillBatch doesn't need to know about
 // providers); we translate on the way out and back.
 
-const VIRTUALS_DEFAULT_MODEL = "moonshotai/kimi-k2-0905";
+const ORYNTH_DEFAULT_MODEL = "moonshotai/kimi-k2-0905";
 
-function virtualsToolsSpec() {
+function orynthToolsSpec() {
   return TOOLS_SPEC.map((t) => ({
     type: "function",
     function: {
@@ -742,7 +742,7 @@ function virtualsToolsSpec() {
 //   { role: "user"|"assistant", content: string }
 //   { role: "assistant", content: [{type:"text",text}, {type:"tool_use",id,name,input}, ...] }
 //   { role: "user", content: [{type:"tool_result",tool_use_id,content,is_error}, ...] }
-function virtualsConvertMessages(system, messages) {
+function orynthConvertMessages(system, messages) {
   const out = [];
   if (system) out.push({ role: "system", content: system });
   for (const m of messages) {
@@ -788,27 +788,27 @@ function virtualsConvertMessages(system, messages) {
   return out;
 }
 
-async function callVirtuals(env, system, messages) {
-  const model = env.VIRTUALS_MODEL || VIRTUALS_DEFAULT_MODEL;
-  return fetch("https://compute.virtuals.io/v1/chat/completions", {
+async function callOrynth(env, system, messages) {
+  const model = env.ORYNTH_MODEL || ORYNTH_DEFAULT_MODEL;
+  return fetch("https://compute.orynth.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${env.VIRTUALS_API_KEY}`,
+      authorization: `Bearer ${env.ORYNTH_API_KEY}`,
     },
     body: JSON.stringify({
       model,
       max_tokens: 2048,
       stream: true,
-      tools: virtualsToolsSpec(),
-      messages: virtualsConvertMessages(system, messages),
+      tools: orynthToolsSpec(),
+      messages: orynthConvertMessages(system, messages),
     }),
   });
 }
 
 // Parses one streaming OpenAI-style response and returns Anthropic-shaped
 // { stopReason, contentBlocks } so the existing tool-use loop is unchanged.
-async function parseVirtualsStream(response, onTextDelta) {
+async function parseOrynthStream(response, onTextDelta) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let textBuf = "";
@@ -894,21 +894,21 @@ function pickProvider(env, body) {
   const envDefault =
     typeof env.LLM_PROVIDER === "string" ? env.LLM_PROVIDER.toLowerCase() : "";
   const choice = requested || envDefault || "anthropic";
-  return choice === "virtuals" ? "virtuals" : "anthropic";
+  return choice === "orynth" ? "orynth" : "anthropic";
 }
 
 function providerConfigured(env, provider) {
-  if (provider === "virtuals") return !!env.VIRTUALS_API_KEY;
+  if (provider === "orynth") return !!env.ORYNTH_API_KEY;
   return !!env.ANTHROPIC_API_KEY;
 }
 
 async function callModel(env, system, messages, provider) {
-  if (provider === "virtuals") return callVirtuals(env, system, messages);
+  if (provider === "orynth") return callOrynth(env, system, messages);
   return callAnthropic(env, system, messages);
 }
 
 async function parseModelStream(response, onTextDelta, provider) {
-  if (provider === "virtuals") return parseVirtualsStream(response, onTextDelta);
+  if (provider === "orynth") return parseOrynthStream(response, onTextDelta);
   return parseStream(response, onTextDelta);
 }
 
